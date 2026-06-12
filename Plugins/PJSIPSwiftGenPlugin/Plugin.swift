@@ -86,6 +86,14 @@ extension PJSIPSwiftGenPlugin {
         )
         let outputFiles = outputNames.map { outputDir.appending($0) }
 
+        // Declare every PJSIP `.h` file the generator might read so that
+        // bumping `swift-pjsip` (which replaces the xcframework Headers tree)
+        // invalidates the cached output and forces regeneration.
+        var inputFiles: [Path] = [configPath]
+        if let pjsipHeadersDir {
+            inputFiles += headerFiles(under: pjsipHeadersDir)
+        }
+
         return [
             .buildCommand(
                 displayName: "Generate PJSIP Swift helpers",
@@ -94,10 +102,27 @@ extension PJSIPSwiftGenPlugin {
                     ["generate"]
                     + commonArgs
                     + ["--output-dir", outputDir.string],
-                inputFiles: [configPath],
+                inputFiles: inputFiles,
                 outputFiles: outputFiles
             ),
         ]
+    }
+
+    /// Recursively collects every `.h` file under `root`, returning their
+    /// `Path` values for declaration as plugin inputs.
+    fileprivate func headerFiles(under root: Path) -> [Path] {
+        let fm = FileManager.default
+        let rootURL = URL(fileURLWithPath: root.string)
+        guard let enumerator = fm.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: nil
+        ) else { return [] }
+        var paths: [Path] = []
+        for case let url as URL in enumerator
+        where url.pathExtension == "h" {
+            paths.append(Path(url.path))
+        }
+        return paths
     }
 
     /// Invokes the generator executable in `list-outputs` mode and returns

@@ -28,7 +28,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/laconicman/swift-pjsip",
-            branch: "main"
+            from: "0.1.0"
         )
     ],
     targets: [
