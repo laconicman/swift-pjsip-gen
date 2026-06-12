@@ -88,6 +88,10 @@ extension PJSIPSwiftGenPlugin {
         Diagnostics.remark("PJSIPSwiftGen: config=\(configPath.string)")
         let config = try loadConfig(at: configPath)
 
+        // The headers root resolves from three possible sources because the plugin
+        // runs in two host environments with different APIs (SwiftPM exposes
+        // dependency graph traversal, Xcode does not) plus an explicit-path
+        // escape hatch in the JSON config.
         let pjRootString: String
         if let pjsipHeadersDir {
             pjRootString = pjsipHeadersDir.string
