@@ -36,6 +36,23 @@ final class PJSIPSwiftGenCoreTests: XCTestCase {
         XCTAssertNil(config.imports)
     }
 
+    func testConfigDecodesWithoutPJProjectRoot() throws {
+        // Plugin-driven workflows can omit `pjprojectRoot` because the plugin
+        // supplies the headers directory via `--pjsip-headers-dir`.
+        let json = """
+        {
+            "searchRoots": [""],
+            "rootTypes": ["pjsua_acc_config"],
+            "skipTypes": [],
+            "manualTypes": []
+        }
+        """.data(using: .utf8)!
+
+        let config = try JSONDecoder().decode(PJSIPSwiftGenConfig.self, from: json)
+        XCTAssertNil(config.pjprojectRoot)
+        XCTAssertEqual(config.searchRoots, [""])
+    }
+
     func testExpectedOutputFilenamesIncludesBothEnumAndStructFiles() {
         let result = DiscoveryResult(
             enums: [

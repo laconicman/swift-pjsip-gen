@@ -16,12 +16,17 @@ func printUsage(to stream: UnsafeMutablePointer<FILE>) {
     fputs(
         """
         Usage:
-          pjsip-swift-gen list-outputs <config.json>
-          pjsip-swift-gen generate     <config.json> --output-dir DIR
+          pjsip-swift-gen list-outputs <config.json> [--pjsip-headers-dir DIR]
+          pjsip-swift-gen generate     <config.json> --output-dir DIR [--pjsip-headers-dir DIR]
 
         Subcommands:
           list-outputs   Print one expected output filename per line, then exit.
-          generate       Parse PJSIP headers and write generated Swift files into DIR.
+          generate       Parse PJSIP headers and write generated Swift files into --output-dir.
+
+        Options:
+          --pjsip-headers-dir DIR  Override `pjprojectRoot` from the config.
+                                   Required when the config omits `pjprojectRoot`.
+          --output-dir DIR         Where `generate` should emit Swift files.
 
         """,
         stream
@@ -44,8 +49,18 @@ guard let configPath = nextArg() else {
 }
 
 var outputDir: String?
+var pjsipHeadersDirOverride: String?
 while let arg = nextArg() {
-    if arg == "--output-dir" { outputDir = nextArg() }
+    switch arg {
+    case "--output-dir":
+        outputDir = nextArg()
+    case "--pjsip-headers-dir":
+        pjsipHeadersDirOverride = nextArg()
+    default:
+        fputs("Error: unknown argument '\(arg)'.\n\n", stderr)
+        printUsage(to: stderr)
+        exit(1)
+    }
 }
 
 // MARK: - Read configuration
@@ -66,9 +81,26 @@ do {
     exit(1)
 }
 
+// CLI flag overrides the config field; at least one must be present.
+let pjRoot: String
+if let override = pjsipHeadersDirOverride {
+    pjRoot = override
+} else if let configured = config.pjprojectRoot {
+    pjRoot = resolvePath(configured, relativeTo: basePath)
+} else {
+    fputs(
+        """
+        Error: PJSIP headers location is unspecified.
+        Provide either `pjprojectRoot` in '\(configPath)'
+        or pass `--pjsip-headers-dir DIR` on the command line.
+        """,
+        stderr
+    )
+    exit(1)
+}
+
 // MARK: - Discover types
 
-let pjRoot = resolvePath(config.pjprojectRoot, relativeTo: basePath)
 let result = discoverTypes(config: config, pjprojectRoot: pjRoot)
 let manualSet = Set(config.manualTypes)
 

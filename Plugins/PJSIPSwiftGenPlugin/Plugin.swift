@@ -7,6 +7,12 @@ import PackagePlugin
 /// Output discovery uses a "list-outputs" subprocess in `createBuildCommands`,
 /// so the plugin avoids duplicating header-parsing logic and still benefits
 /// from SwiftPM's incremental build caching for the actual `generate` step.
+///
+/// When invoked from SwiftPM (`swift build`), the plugin auto-discovers the
+/// `swift-pjsip` checkout and passes its xcframework Headers directory to the
+/// executable via `--pjsip-headers-dir`. In Xcode build-tool contexts that
+/// auto-discovery is not available, so consumers must set `pjprojectRoot` in
+/// `pjsip-swift-gen.json`.
 @main
 struct PJSIPSwiftGenPlugin: BuildToolPlugin {
     func createBuildCommands(
@@ -18,10 +24,12 @@ struct PJSIPSwiftGenPlugin: BuildToolPlugin {
         }
         let configPath = sourceTarget.directory
             .appending("pjsip-swift-gen.json")
+        let pjsipHeadersDir = locatePJSIPHeaders(in: context.package)
         return try makeBuildCommands(
             configPath: configPath,
             toolPath: try context.tool(named: "pjsip-swift-gen").path,
-            outputDir: context.pluginWorkDirectory.appending("GeneratedSources")
+            outputDir: context.pluginWorkDirectory.appending("GeneratedSources"),
+            pjsipHeadersDir: pjsipHeadersDir
         )
     }
 }
@@ -45,10 +53,14 @@ extension PJSIPSwiftGenPlugin: XcodeBuildToolPlugin {
             )
             return []
         }
+        // XcodePluginContext has no view of SwiftPM dependencies, so we cannot
+        // auto-discover `swift-pjsip` here. The consumer's config must set
+        // `pjprojectRoot` to the xcframework's Headers directory.
         return try makeBuildCommands(
             configPath: configPath,
             toolPath: try context.tool(named: "pjsip-swift-gen").path,
-            outputDir: context.pluginWorkDirectory.appending("GeneratedSources")
+            outputDir: context.pluginWorkDirectory.appending("GeneratedSources"),
+            pjsipHeadersDir: nil
         )
     }
 }
@@ -60,11 +72,17 @@ extension PJSIPSwiftGenPlugin {
     fileprivate func makeBuildCommands(
         configPath: Path,
         toolPath: Path,
-        outputDir: Path
+        outputDir: Path,
+        pjsipHeadersDir: Path?
     ) throws -> [Command] {
+        var commonArgs = [configPath.string]
+        if let pjsipHeadersDir {
+            commonArgs += ["--pjsip-headers-dir", pjsipHeadersDir.string]
+        }
+
         let outputNames = try discoverExpectedOutputs(
             toolPath: toolPath,
-            configPath: configPath
+            arguments: ["list-outputs"] + commonArgs
         )
         let outputFiles = outputNames.map { outputDir.appending($0) }
 
@@ -72,12 +90,10 @@ extension PJSIPSwiftGenPlugin {
             .buildCommand(
                 displayName: "Generate PJSIP Swift helpers",
                 executable: toolPath,
-                arguments: [
-                    "generate",
-                    configPath.string,
-                    "--output-dir",
-                    outputDir.string,
-                ],
+                arguments:
+                    ["generate"]
+                    + commonArgs
+                    + ["--output-dir", outputDir.string],
                 inputFiles: [configPath],
                 outputFiles: outputFiles
             ),
@@ -88,11 +104,11 @@ extension PJSIPSwiftGenPlugin {
     /// the expected filenames, one per stdout line.
     fileprivate func discoverExpectedOutputs(
         toolPath: Path,
-        configPath: Path
+        arguments: [String]
     ) throws -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: toolPath.string)
-        process.arguments = ["list-outputs", configPath.string]
+        process.arguments = arguments
 
         let stdoutPipe = Pipe()
         process.standardOutput = stdoutPipe
@@ -113,6 +129,82 @@ extension PJSIPSwiftGenPlugin {
             .map(String.init)
             .filter { !$0.isEmpty }
     }
+}
+
+// MARK: - swift-pjsip discovery
+
+extension PJSIPSwiftGenPlugin {
+    /// Walks the consumer's transitive dependency tree for the `swift-pjsip`
+    /// package (declared as `name: "PJSIP"` in its manifest) and returns the
+    /// path to a Headers directory inside its xcframework, or `nil` if it
+    /// cannot be located.
+    fileprivate func locatePJSIPHeaders(in package: Package) -> Path? {
+        guard let pjsipPackage = findDependency(
+            displayName: pjsipPackageName,
+            in: package,
+            visited: []
+        ) else {
+            Diagnostics.remark(
+                "swift-pjsip not found in dependency graph; "
+                + "falling back to `pjprojectRoot` from the config."
+            )
+            return nil
+        }
+
+        let xcframework = pjsipPackage.directory
+            .appending([xcframeworkSubpath, xcframeworkName])
+
+        guard let slice = firstSlice(under: xcframework) else {
+            Diagnostics.warning(
+                "Could not find a platform slice with Headers/ inside "
+                + xcframework.string
+            )
+            return nil
+        }
+        return xcframework.appending([slice, "Headers"])
+    }
+
+    private func findDependency(
+        displayName name: String,
+        in package: Package,
+        visited: Set<Package.ID>
+    ) -> Package? {
+        if package.displayName == name { return package }
+        var visited = visited
+        visited.insert(package.id)
+        for dep in package.dependencies {
+            if visited.contains(dep.package.id) { continue }
+            if let hit = findDependency(
+                displayName: name,
+                in: dep.package,
+                visited: visited
+            ) {
+                return hit
+            }
+        }
+        return nil
+    }
+
+    private func firstSlice(under xcframework: Path) -> String? {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: xcframework.string)
+        else { return nil }
+        return entries
+            .filter { $0 != "Info.plist" && !$0.hasPrefix(".") }
+            .sorted()
+            .first { entry in
+                let headersDir = xcframework
+                    .appending([entry, "Headers"])
+                    .string
+                var isDir: ObjCBool = false
+                return fm.fileExists(atPath: headersDir, isDirectory: &isDir)
+                    && isDir.boolValue
+            }
+    }
+
+    private var pjsipPackageName: String { "PJSIP" }
+    private var xcframeworkSubpath: String { "Binaries" }
+    private var xcframeworkName: String { "PJSIP.xcframework" }
 }
 
 enum PJSIPSwiftGenPluginError: Error, CustomStringConvertible {
