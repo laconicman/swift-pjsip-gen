@@ -56,6 +56,10 @@ dependencies: [
 ]
 ```
 
+> Until this repo has its first semantic-version tag, resolve it with
+> `branch: "main"` instead of `from:`. (Fully-qualified semver tags are also a
+> Swift Package Index listing requirement.)
+
 ### 2. Configure the target
 
 Drop a `pjsip-swift-gen.json` into the target's source directory (for Xcode app
