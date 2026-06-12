@@ -61,13 +61,16 @@ extension PJSIPSwiftGenPlugin: XcodeBuildToolPlugin {
             return []
         }
         // XcodePluginContext exposes no view of SwiftPM dependencies, so we
-        // cannot auto-discover `swift-pjsip` here. The consumer's config
-        // must set `pjprojectRoot` to the xcframework's Headers directory.
+        // walk up from the plugin's work directory (which lives inside the
+        // project's DerivedData) to locate `SourcePackages/checkouts/swift-pjsip/`.
+        let pjsipHeadersDir = locatePJSIPHeadersByWalkingUp(
+            from: context.pluginWorkDirectory
+        )
         return try makeBuildCommands(
             configPath: configPath,
             toolPath: try context.tool(named: "pjsip-swift-gen").path,
             outputDir: context.pluginWorkDirectory.appending("GeneratedSources"),
-            pjsipHeadersDir: nil
+            pjsipHeadersDir: pjsipHeadersDir
         )
     }
 }
@@ -228,6 +231,36 @@ extension PJSIPSwiftGenPlugin {
     private var pjsipPackageName: String { "PJSIP" }
     private var xcframeworkSubpath: String { "Binaries" }
     private var xcframeworkName: String { "PJSIP.xcframework" }
+
+    /// Walks parent directories of `start` looking for
+    /// `SourcePackages/checkouts/swift-pjsip/Binaries/PJSIP.xcframework`.
+    /// Used in Xcode build-tool contexts where the plugin runs from inside
+    /// DerivedData but has no SPM API to enumerate package dependencies.
+    fileprivate func locatePJSIPHeadersByWalkingUp(from start: Path) -> Path? {
+        let fm = FileManager.default
+        var dir = URL(fileURLWithPath: start.string)
+        let candidateRelative = "SourcePackages/checkouts/swift-pjsip/"
+            + xcframeworkSubpath + "/" + xcframeworkName
+
+        for _ in 0..<20 {
+            let candidate = dir.appendingPathComponent(candidateRelative).path
+            if fm.fileExists(atPath: candidate) {
+                guard let slice = firstSlice(under: Path(candidate)) else {
+                    return nil
+                }
+                return Path(candidate).appending([slice, "Headers"])
+            }
+            let parent = dir.deletingLastPathComponent()
+            if parent.path == dir.path { break }
+            dir = parent
+        }
+        Diagnostics.remark(
+            "swift-pjsip checkout not found by walking up from "
+            + start.string
+            + "; the plugin will require `pjprojectRoot` in the JSON config."
+        )
+        return nil
+    }
 }
 
 enum PJSIPSwiftGenPluginError: Error, CustomStringConvertible {
