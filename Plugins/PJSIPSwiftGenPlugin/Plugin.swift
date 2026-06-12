@@ -85,16 +85,19 @@ extension PJSIPSwiftGenPlugin {
         outputDir: Path,
         pjsipHeadersDir: Path?
     ) throws -> [Command] {
+        Diagnostics.remark("PJSIPSwiftGen: config=\(configPath.string)")
         let config = try loadConfig(at: configPath)
 
         let pjRootString: String
         if let pjsipHeadersDir {
             pjRootString = pjsipHeadersDir.string
+            Diagnostics.remark("PJSIPSwiftGen: auto-discovered headers=\(pjRootString)")
         } else if let configured = config.pjprojectRoot {
             pjRootString = resolvePath(
                 configured,
                 relativeTo: configPath.removingLastComponent().string
             )
+            Diagnostics.remark("PJSIPSwiftGen: config-supplied headers=\(pjRootString)")
         } else {
             throw PJSIPSwiftGenPluginError.headersDirUnspecified(
                 configPath: configPath.string
@@ -107,6 +110,11 @@ extension PJSIPSwiftGenPlugin {
             for: result,
             manualSet: manualSet
         ).map { outputDir.appending($0) }
+
+        Diagnostics.remark(
+            "PJSIPSwiftGen: discovered \(result.enums.count) enums, "
+            + "\(result.structs.count) structs → \(outputFiles.count) outputs"
+        )
 
         // Declare every PJSIP `.h` file the generator might read so that
         // bumping `swift-pjsip` (which replaces the xcframework Headers tree)
