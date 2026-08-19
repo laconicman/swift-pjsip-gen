@@ -138,6 +138,63 @@ drift becomes an explicit, reviewable version bump instead of a silent change.
    `-skipPackagePluginValidation`. Worth automating into any CI recipe that
    builds a consumer of this package.
 
+## Preprocessor guards on discovered members (the G1 fix)
+
+`CHeaderParser` records the innermost `#if` around each discovered enum case or
+struct field as a **C macro name**. Emitting that name into a Swift `#if` looks
+right and is not: Swift `#if` only knows conditions declared via `-D` /
+`swiftSettings`, and an unknown identifier there evaluates to **false**. Every
+guarded member was therefore deleted from the generated output — on every
+platform, silently, because the result still compiles.
+
+Measured against the shipped `swift-pjsip` headers: 4 guards across 156 generated
+files, of which one — `PJ_HAS_FLOATING_POINT`, value **1** — was wrongly dropping
+`pj_math_stat.fmean_` and `.mean_res_`, i.e. the mean of every jitter and RTT
+statistic.
+
+**The fix is to resolve, not to translate.** Mapping macros to `os(iOS)`-style
+conditions only works for platform macros, and none of the four real cases is one;
+they are all build-configuration macros. But the value is knowable exactly: the
+generated code is compiled against *one* prebuilt binary whose `config_site.h`
+ships inside the same `Headers/` directory being parsed. `MacroResolver` runs
+`clang -E -dM` over the PJSIP config headers once (~5000 macros, one invocation)
+and the generators then **include or omit the member outright**. No `#if` appears
+in generated output at all.
+
+Rules that fell out, and are worth keeping:
+
+- **Unresolvable guard ⇒ omit, and say so on stderr.** Omitting is the compiling
+  direction (a member absent from the binary would be a consumer compile error);
+  silence is what made the original defect survive. Never a `#warning` in
+  generated source — that would fire on every consumer build forever for
+  something only the generator can fix.
+- **A guarded-out *type* still gets its file**, containing a comment explaining
+  why it is empty. Build-tool plugins declare `outputFiles` at plan time, so a
+  file that simply vanishes breaks the incremental contract (constraint 2 above).
+- **A bare `#define NAME` with no value stays "unknown"**, because the parser does
+  not record whether it saw `#if NAME` (false) or `#ifdef NAME` (true).
+
+## Known defect: slice selection ignores the build platform (G2)
+
+`firstSlice()` (`Plugins/PJSIPSwiftGenPlugin/Plugin.swift`) picks the
+**alphabetically first** xcframework slice directory containing `Headers/`. Today
+the artifact ships `ios-arm64` and `ios-arm64-simulator`, so that is correct **by
+accident**.
+
+The moment `swift-pjsip` adds the planned `macos-arm64` slice, `"ios-arm64"` still
+sorts first — so **a macOS build would generate Swift from the iOS headers** and
+look fine doing it. With G1 fixed this is now the *only* silent wrongness left in
+the pipeline, and it is worse than it looks: `MacroResolver` would then resolve
+guards against the iOS `config_site.h` while compiling against the macOS binary,
+turning a header mismatch into member-level mismatches.
+
+Not fixed here — this branch is deliberately scoped to G1, which is live on iOS
+today and independently valuable. The fix, when the macOS slice lands: map
+`PluginContext`'s target platform to the slice's `SupportedPlatform` /
+`SupportedPlatformVariant` from the xcframework `Info.plist` rather than sorting
+names. Do **not** vary the *output file set* by platform — outputs are declared at
+plan time (constraint 2); vary the contents.
+
 ## Verification practices that proved out
 
 - Run the executable end-to-end against the real `swift-pjsip` xcframework

@@ -131,13 +131,24 @@ case .generate:
 
     let imports = config.imports ?? []
 
+    // Resolve the C macros that guard members ONCE, against the same headers we
+    // just parsed — they ship with the config_site.h that built the binary, so
+    // the answers are exact. Without this the guards became Swift `#if`s that are
+    // always false, silently deleting members (G1).
+    let macros = MacroResolver(headersRoot: pjRoot)
+    if !macros.isResolved {
+        fputs("  Warning: could not preprocess '\(pjRoot)' to resolve macro guards; "
+              + "every guarded member will be omitted and reported.\n", stderr)
+    }
+
     for enumType in result.enums where !manualSet.contains(enumType.name) {
         generateEnumConformances(
             enumName: enumType.name,
             headerPath: enumType.headerPath,
             outputDir: outputDir,
             imports: imports,
-            ppCondition: enumType.ppCondition
+            ppCondition: enumType.ppCondition,
+            macros: macros
         )
     }
 
@@ -147,7 +158,8 @@ case .generate:
             headerPath: structType.headerPath,
             outputDir: outputDir,
             imports: imports,
-            ppCondition: structType.ppCondition
+            ppCondition: structType.ppCondition,
+            macros: macros
         )
     }
 

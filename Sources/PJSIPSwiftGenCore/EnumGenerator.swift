@@ -7,7 +7,8 @@ public func generateEnumConformances(
     headerPath: String,
     outputDir: String,
     imports: [String] = [],
-    ppCondition: String? = nil
+    ppCondition: String? = nil,
+    macros: MacroResolver? = nil
 ) {
     guard let rawSource = try? String(
         contentsOfFile: headerPath, encoding: .utf8
@@ -22,7 +23,6 @@ public func generateEnumConformances(
         return
     }
 
-    let autoGenMarker = "// Auto-generated"
     let filename = URL(fileURLWithPath: headerPath).lastPathComponent
     let importBlock = imports.isEmpty
         ? ""
@@ -39,21 +39,19 @@ public func generateEnumConformances(
                 switch self {
 
         """
-        var currentCondition: String?
+        // A case guarded by a C macro is emitted only when that macro is really
+        // on in the binary these headers describe. It must NOT become a Swift
+        // `#if`: Swift cannot see C macros and reads the unknown identifier as
+        // false, which silently deleted the case. See MacroResolver.
         for c in cases {
-            if c.ppCondition != currentCondition {
-                if currentCondition != nil {
-                    out += "        #endif\n"
-                }
-                if let cond = c.ppCondition {
-                    out += "        #if \(cond)\n"
-                }
-                currentCondition = c.ppCondition
+            switch resolveGuard(c.ppCondition, with: macros) {
+            case .emit:
+                out += "        case \(c.name): \"\(c.name)\"\n"
+            case .omit:
+                continue
+            case .omitUnresolved(let macro):
+                reportUnresolvedGuard(macro: macro, member: c.name, owner: enumName)
             }
-            out += "        case \(c.name): \"\(c.name)\"\n"
-        }
-        if currentCondition != nil {
-            out += "        #endif\n"
         }
         out += """
                 default: "\\(rawValue)"
@@ -82,14 +80,23 @@ public func generateEnumConformances(
 
     // ── Conditional compilation wrapping ──
 
+    // Same rule for a type that is itself guarded — but the file must still be
+    // written, because the build-tool plugin declares its outputs up front and a
+    // missing file breaks that contract. So a type that does not exist in this
+    // binary yields a file that explains itself and declares nothing.
     let wrappedDebug: String
     let wrappedString: String
-    if let cond = ppCondition {
-        wrappedDebug = "#if \(cond)\n" + debugBody + "#endif\n"
-        wrappedString = "#if \(cond)\n" + stringBody + "#endif\n"
-    } else {
+    switch resolveGuard(ppCondition, with: macros) {
+    case .emit:
         wrappedDebug = debugBody
         wrappedString = stringBody
+    case .omit:
+        wrappedDebug = absentTypeStub(enumName, guardedBy: ppCondition, resolved: true)
+        wrappedString = wrappedDebug
+    case .omitUnresolved(let macro):
+        reportUnresolvedGuard(macro: macro, member: nil, owner: enumName)
+        wrappedDebug = absentTypeStub(enumName, guardedBy: macro, resolved: false)
+        wrappedString = wrappedDebug
     }
 
     // ── Write ──

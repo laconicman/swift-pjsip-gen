@@ -7,7 +7,8 @@ public func generateStructConformance(
     headerPath: String,
     outputDir: String,
     imports: [String] = [],
-    ppCondition: String? = nil
+    ppCondition: String? = nil,
+    macros: MacroResolver? = nil
 ) {
     guard let rawSource = try? String(
         contentsOfFile: headerPath, encoding: .utf8
@@ -23,7 +24,6 @@ public func generateStructConformance(
     }
 
     let pairs = matchPairs(from: fields)
-    let autoGenMarker = "// Auto-generated"
     let filename = URL(fileURLWithPath: headerPath).lastPathComponent
 
     var out = "\(autoGenMarker) from \(filename). DO NOT EDIT MANUALLY.\n"
@@ -44,23 +44,30 @@ public func generateStructConformance(
     out += "extension \(structName): @retroactive CustomStringConvertible {\n"
     out += "    public var description: String {\n"
 
+    // Guarded members are resolved against the binary's own config_site.h rather
+    // than emitted as Swift `#if`, which cannot see C macros and silently reads
+    // them as false. See MacroResolver.
+    var omittedFields = Set<String>()
     for p in pairs {
-        if let cond = p.ppCondition {
-            out += "        #if \(cond)\n"
+        switch resolveGuard(p.ppCondition, with: macros) {
+        case .omit:
+            omittedFields.insert(p.arrayField)
+            continue
+        case .omitUnresolved(let macro):
+            reportUnresolvedGuard(macro: macro, member: p.arrayField, owner: structName)
+            omittedFields.insert(p.arrayField)
+            continue
+        case .emit:
+            break
         }
         out += "        let \(p.arrayField)Slice = tupleToArray(\n"
         out += "            \(p.arrayField),\n"
         out += "            count: Int(\(p.countField)),\n"
         out += "            as: \(p.elementType).self\n"
         out += "        )\n"
-        if p.ppCondition != nil {
-            out += "        #endif\n"
-        }
     }
 
     out += "        var parts: [String] = []\n"
-
-    var currentCondition: String?
 
     for f in fields {
         let emitsCode: Bool
@@ -80,22 +87,16 @@ public func generateStructConformance(
             emitsCode = true
         }
 
-        if emitsCode {
-            if f.ppCondition != currentCondition {
-                if currentCondition != nil {
-                    out += "        #endif\n"
-                }
-                if let cond = f.ppCondition {
-                    out += "        #if \(cond)\n"
-                }
-                currentCondition = f.ppCondition
-            }
-            out += line
-        }
-    }
+        guard emitsCode, !omittedFields.contains(f.name) else { continue }
 
-    if currentCondition != nil {
-        out += "        #endif\n"
+        switch resolveGuard(f.ppCondition, with: macros) {
+        case .emit:
+            out += line
+        case .omit:
+            continue
+        case .omitUnresolved(let macro):
+            reportUnresolvedGuard(macro: macro, member: f.name, owner: structName)
+        }
     }
 
     out += "        return \"\(structName)(\""
@@ -104,8 +105,17 @@ public func generateStructConformance(
     out += "    }\n"
     out += "}\n"
 
-    if let cond = ppCondition {
-        out = "#if \(cond)\n" + out + "#endif\n"
+    // A type that does not exist in this binary still gets its file written: the
+    // build-tool plugin declares outputs up front, so a missing file breaks that
+    // contract. The file explains itself and declares nothing.
+    switch resolveGuard(ppCondition, with: macros) {
+    case .emit:
+        break
+    case .omit:
+        out = absentTypeStub(structName, guardedBy: ppCondition, resolved: true)
+    case .omitUnresolved(let macro):
+        reportUnresolvedGuard(macro: macro, member: nil, owner: structName)
+        out = absentTypeStub(structName, guardedBy: macro, resolved: false)
     }
 
     // ── Write ──
