@@ -23,6 +23,24 @@ public func generateStructConformance(
         return
     }
 
+    // Resolve the TYPE's own guard before anything else: if the type is not in this
+    // binary, emit the stub and stop. Walking the members first would print a warning per
+    // member for a type that produces no members at all.
+    let typeGuard = resolveGuard(ppCondition, with: macros)
+    switch typeGuard {
+    case .emit:
+        break
+    case .omit:
+        writeGenerated(absentTypeStub(structName, guardedBy: ppCondition, resolved: true),
+                       to: "\(outputDir)/\(structName)+CustomStringConvertible.swift")
+        return
+    case .omitUnresolved(let condition):
+        reportUnresolvedGuard(condition: condition, member: nil, owner: structName)
+        writeGenerated(absentTypeStub(structName, guardedBy: condition, resolved: false),
+                       to: "\(outputDir)/\(structName)+CustomStringConvertible.swift")
+        return
+    }
+
     let pairs = matchPairs(from: fields)
     let filename = URL(fileURLWithPath: headerPath).lastPathComponent
 
@@ -49,12 +67,15 @@ public func generateStructConformance(
     // them as false. See MacroResolver.
     var omittedFields = Set<String>()
     for p in pairs {
-        switch resolveGuard(p.ppCondition, with: macros) {
+        // BOTH guards must hold. The count field's alone is not enough: when the array
+        // carries a different condition and is compiled out, emitting on the count's
+        // guard produces `tupleToArray(<array>, …)` for a field that does not exist.
+        switch resolveGuards([p.ppCondition, p.arrayPPCondition], with: macros) {
         case .omit:
             omittedFields.insert(p.arrayField)
             continue
-        case .omitUnresolved(let macro):
-            reportUnresolvedGuard(macro: macro, member: p.arrayField, owner: structName)
+        case .omitUnresolved(let condition):
+            reportUnresolvedGuard(condition: condition, member: p.arrayField, owner: structName)
             omittedFields.insert(p.arrayField)
             continue
         case .emit:
@@ -94,8 +115,8 @@ public func generateStructConformance(
             out += line
         case .omit:
             continue
-        case .omitUnresolved(let macro):
-            reportUnresolvedGuard(macro: macro, member: f.name, owner: structName)
+        case .omitUnresolved(let condition):
+            reportUnresolvedGuard(condition: condition, member: f.name, owner: structName)
         }
     }
 
@@ -105,18 +126,6 @@ public func generateStructConformance(
     out += "    }\n"
     out += "}\n"
 
-    // A type that does not exist in this binary still gets its file written: the
-    // build-tool plugin declares outputs up front, so a missing file breaks that
-    // contract. The file explains itself and declares nothing.
-    switch resolveGuard(ppCondition, with: macros) {
-    case .emit:
-        break
-    case .omit:
-        out = absentTypeStub(structName, guardedBy: ppCondition, resolved: true)
-    case .omitUnresolved(let macro):
-        reportUnresolvedGuard(macro: macro, member: nil, owner: structName)
-        out = absentTypeStub(structName, guardedBy: macro, resolved: false)
-    }
 
     // ── Write ──
 

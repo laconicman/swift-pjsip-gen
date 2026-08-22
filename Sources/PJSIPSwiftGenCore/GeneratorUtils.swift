@@ -21,13 +21,13 @@ let autoGenMarker = "// Auto-generated"
 /// time, so a file that simply vanishes breaks incremental builds. It declares
 /// nothing, which is exactly what the old always-false Swift `#if` achieved by
 /// accident; the difference is that it now says why.
-func absentTypeStub(_ typeName: String, guardedBy macro: String?, resolved: Bool) -> String {
+func absentTypeStub(_ typeName: String, guardedBy condition: String?, resolved: Bool) -> String {
     let reason = resolved
-        ? "`\(macro ?? "?")` is 0 in the config_site.h this binary was built with, "
-          + "so the type is not in the headers."
-        : "`\(macro ?? "?")` could not be resolved (no preprocessor probe), so this "
-          + "generator declined to guess. If the type does exist, fix the probe — "
-          + "see MacroResolver — and regenerate."
+        ? "`\(condition ?? "?")` is false for the config_site.h this binary was built "
+          + "with, so the type is not in the headers."
+        : "`\(condition ?? "?")` could not be evaluated, so this generator declined to "
+          + "guess. If the type does exist, fix the probe — see MacroResolver — and "
+          + "regenerate."
     return """
     \(autoGenMarker): nothing to generate for `\(typeName)`.
     // \(reason)
@@ -41,8 +41,9 @@ func absentTypeStub(_ typeName: String, guardedBy macro: String?, resolved: Bool
 /// Always to stderr, never as a `#warning` in generated source — a `#warning`
 /// would fire on every consumer build forever for a condition only this
 /// generator can fix.
-func reportUnresolvedGuard(macro: String, member: String?, owner: String) {
+func reportUnresolvedGuard(condition: String, member: String?, owner: String) {
     let what = member.map { "\(owner).\($0)" } ?? owner
-    fputs("  Warning: guard '\(macro)' on \(what) could not be resolved; omitted. "
-          + "If it should be present, check the headers dir passed to MacroResolver.\n", stderr)
+    fputs("  Warning: guard '#if \(condition)' on \(what) could not be evaluated; "
+          + "omitted (the compiling direction). If it should be present, check the "
+          + "headers dir passed to MacroResolver.\n", stderr)
 }

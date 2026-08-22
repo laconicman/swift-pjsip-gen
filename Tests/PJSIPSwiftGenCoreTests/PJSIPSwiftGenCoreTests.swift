@@ -157,6 +157,140 @@ final class PJSIPSwiftGenCoreTests: XCTestCase {
         XCTAssertFalse(out.contains("#if"))
     }
 
+    // MARK: - Guard direction (regressions caught in review of the G1 fix)
+
+    /// Builds the minimal header tree `MacroResolver` preprocesses, with `pj/config.h`
+    /// carrying the macros a test wants.
+    private func makeHeaderRoot(defining defines: [String: String]) throws -> String {
+        let root = try makeTempDir()
+        let fm = FileManager.default
+        for dir in ["pj", "pjlib-util", "pjnath", "pjmedia",
+                    "pjmedia-audiodev", "pjmedia-videodev", "pjmedia-codec", "pjsip"] {
+            try fm.createDirectory(atPath: "\(root)/\(dir)", withIntermediateDirectories: true)
+        }
+        let body = defines.map { "#define \($0.key) \($0.value)" }.joined(separator: "\n")
+        try body.write(toFile: "\(root)/pj/config.h", atomically: true, encoding: .utf8)
+        for path in ["pjlib-util/config.h", "pjnath/config.h", "pjmedia/config.h",
+                     "pjmedia-audiodev/config.h", "pjmedia-videodev/config.h",
+                     "pjmedia-codec/config.h", "pjsip/sip_config.h"] {
+            try "".write(toFile: "\(root)/\(path)", atomically: true, encoding: .utf8)
+        }
+        return root
+    }
+
+    /// `#ifndef X` with X truthy means the member is NOT in the binary. Resolving on the
+    /// macro's value alone got this backwards and emitted a member the C preprocessor
+    /// removes — a hard compile error in the consumer, and strictly worse than the silent
+    /// omission the fix was for.
+    func testInvertedGuardOverTruthyMacroOmitsTheMember() throws {
+        let root = try makeHeaderRoot(defining: ["DEMO_FEATURE": "1"])
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let resolver = MacroResolver(headersRoot: root)
+        try XCTSkipUnless(resolver.isResolved, "no usable clang for the preprocessor probe")
+
+        XCTAssertEqual(resolver.isEnabled("!defined(DEMO_FEATURE)"), false)
+        XCTAssertEqual(resolver.isEnabled("defined(DEMO_FEATURE)"), true)
+        XCTAssertEqual(resolver.isEnabled("DEMO_FEATURE"), true)
+        XCTAssertEqual(resolver.isEnabled("!DEMO_FEATURE"), false)
+        XCTAssertEqual(resolver.isEnabled("DEMO_FEATURE == 0"), false)
+        XCTAssertEqual(resolver.isEnabled("DEMO_FEATURE < 2"), true)
+    }
+
+    /// A value clang can evaluate but `Int(_:)` cannot must not be treated as unknown.
+    func testNonDecimalMacroValuesStillResolve() throws {
+        let root = try makeHeaderRoot(defining: [
+            "PARENTHESISED": "(1)", "HEXY": "0x10", "ALIASED": "PARENTHESISED", "OFFY": "(0)"
+        ])
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let resolver = MacroResolver(headersRoot: root)
+        try XCTSkipUnless(resolver.isResolved, "no usable clang for the preprocessor probe")
+
+        XCTAssertEqual(resolver.isEnabled("PARENTHESISED"), true)
+        XCTAssertEqual(resolver.isEnabled("HEXY"), true)
+        XCTAssertEqual(resolver.isEnabled("ALIASED"), true)
+        XCTAssertEqual(resolver.isEnabled("OFFY"), false)
+    }
+
+    /// The directive's meaning must survive parsing; recording only the macro name is what
+    /// made the inverted cases above indistinguishable from the plain ones.
+    func testNormalizedConditionPreservesTheDirectivesMeaning() {
+        XCTAssertEqual(normalizedCondition(from: "#if PJ_FOO"), "PJ_FOO")
+        XCTAssertEqual(normalizedCondition(from: "#ifdef PJ_FOO"), "defined(PJ_FOO)")
+        XCTAssertEqual(normalizedCondition(from: "#ifndef PJ_FOO"), "!defined(PJ_FOO)")
+        XCTAssertEqual(normalizedCondition(from: "#if !defined(PJ_FOO)"), "!defined(PJ_FOO)")
+        XCTAssertEqual(normalizedCondition(from: "#if PJ_FOO == 0"), "PJ_FOO == 0")
+    }
+
+    /// A count+array pair carries two guards. Emitting on the count's alone can reference
+    /// an array field that was compiled out.
+    func testPairGuardsCombineSoEitherSideCanVeto() throws {
+        let root = try makeHeaderRoot(defining: ["ON": "1", "OFF": "0"])
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let resolver = MacroResolver(headersRoot: root)
+        try XCTSkipUnless(resolver.isResolved, "no usable clang for the preprocessor probe")
+
+        if case .emit = resolveGuards(["ON", "ON"], with: resolver) {} else {
+            XCTFail("both on should emit")
+        }
+        if case .omit = resolveGuards(["ON", "OFF"], with: resolver) {} else {
+            XCTFail("array guard off must veto the pair")
+        }
+        if case .omit = resolveGuards(["OFF", "ON"], with: resolver) {} else {
+            XCTFail("count guard off must veto the pair")
+        }
+        if case .omitUnresolved = resolveGuards(["ON", unresolvableCondition], with: resolver) {} else {
+            XCTFail("an unresolvable side must be reported, not silently omitted")
+        }
+    }
+
+    /// The `#else` arm holds exactly when the opening condition does not, so it must be
+    /// recorded as that negation — not inherited (which would be backwards) and not simply
+    /// dropped. `pj_math_stat` is the live case: `fmean_` under `#if PJ_HAS_FLOATING_POINT`,
+    /// `mean_res_` under its `#else`, exactly one of which is in the binary.
+    func testElseBranchMembersCarryTheNegatedCondition() throws {
+        let header = """
+        typedef struct branchy {
+            int always;
+        #if DEMO_FEATURE
+            int when_on;
+        #else
+            int when_off;
+        #endif
+        } branchy;
+        """
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let headerPath = "\(dir)/branchy.h"
+        try header.write(toFile: headerPath, atomically: true, encoding: .utf8)
+
+        let fields = parseStruct(named: "branchy", in: header)
+        XCTAssertEqual(fields?.first(where: { $0.name == "when_on" })?.ppCondition, "DEMO_FEATURE")
+        XCTAssertEqual(fields?.first(where: { $0.name == "when_off" })?.ppCondition,
+                       "!(DEMO_FEATURE)")
+        XCTAssertNil(fields?.first(where: { $0.name == "always" })?.ppCondition)
+    }
+
+    /// An `#elif` arm holds only when every earlier arm did not, which the single-condition
+    /// model cannot express — so the rest of the chain must be refused, not guessed.
+    func testElifChainIsRefusedRatherThanGuessed() throws {
+        let header = """
+        typedef struct chainy {
+            int always;
+        #if MODE_A
+            int a;
+        #elif MODE_B
+            int b;
+        #else
+            int c;
+        #endif
+        } chainy;
+        """
+        let fields = parseStruct(named: "chainy", in: header)
+        XCTAssertEqual(fields?.first(where: { $0.name == "a" })?.ppCondition, "MODE_A")
+        XCTAssertEqual(fields?.first(where: { $0.name == "b" })?.ppCondition, unresolvableCondition)
+        XCTAssertEqual(fields?.first(where: { $0.name == "c" })?.ppCondition, unresolvableCondition)
+    }
+
     private func makeTempDir() throws -> String {
         let dir = NSTemporaryDirectory() + "pjsipgen-test-" + UUID().uuidString
         try FileManager.default.createDirectory(

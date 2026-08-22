@@ -152,7 +152,7 @@ files, of which one — `PJ_HAS_FLOATING_POINT`, value **1** — was wrongly dro
 `pj_math_stat.fmean_` and `.mean_res_`, i.e. the mean of every jitter and RTT
 statistic.
 
-**The fix is to resolve, not to translate.** Mapping macros to `os(iOS)`-style
+**The fix is to resolve the CONDITION, not to look up the macro.** Mapping macros to `os(iOS)`-style
 conditions only works for platform macros, and none of the four real cases is one;
 they are all build-configuration macros. But the value is knowable exactly: the
 generated code is compiled against *one* prebuilt binary whose `config_site.h`
@@ -160,6 +160,23 @@ ships inside the same `Headers/` directory being parsed. `MacroResolver` runs
 `clang -E -dM` over the PJSIP config headers once (~5000 macros, one invocation)
 and the generators then **include or omit the member outright**. No `#if` appears
 in generated output at all.
+
+An earlier cut of this resolved the macro *name* and tested it for non-zero. Review caught that
+this is wrong for every inverted or comparing guard — `#ifndef X`, `#if !X`, `#if X == 0`,
+`#if X < 2` — where a truthy macro means the member is **absent**. Getting that backwards emits a
+member the preprocessor removed, which is a hard compile error in the consumer and strictly worse
+than the silent omission being fixed. It was not hypothetical: `pj_math_stat` puts `fmean_` under
+`#if PJ_HAS_FLOATING_POINT` and `mean_res_` under its `#else`, so the name-based version emitted
+both and produced code that would not compile.
+
+So the parser records what the directive *means* (`normalizedCondition`: `#ifdef X` →
+`defined(X)`, `#ifndef X` → `!defined(X)`, `#if EXPR` → `EXPR`), an `#else` arm records the
+negation of its opening condition, and clang evaluates the whole expression verbatim. Handing the
+condition to clang also disposes of non-integer macro values — `(1)`, hex, aliases — for free.
+
+An `#elif` arm holds only when every earlier arm did not, which this single-condition model cannot
+express; the rest of such a chain is marked unresolvable rather than guessed. None occur in the
+headers today.
 
 Rules that fell out, and are worth keeping:
 
@@ -171,8 +188,19 @@ Rules that fell out, and are worth keeping:
 - **A guarded-out *type* still gets its file**, containing a comment explaining
   why it is empty. Build-tool plugins declare `outputFiles` at plan time, so a
   file that simply vanishes breaks the incremental contract (constraint 2 above).
-- **A bare `#define NAME` with no value stays "unknown"**, because the parser does
-  not record whether it saw `#if NAME` (false) or `#ifdef NAME` (true).
+- **Anything that must all hold, resolves together.** A count+array pair carries two guards
+  (`CountArrayPair.ppCondition` and `.arrayPPCondition`); emitting on the count's alone can
+  reference an array field that was compiled out. `resolveGuards(_:with:)` lets either side veto.
+- **The unresolvable sentinel is refused before the preprocessor, not by it.** C treats an
+  undefined identifier in `#if` as `0`, so handing a sentinel to clang returns a confident
+  "false" and drops the member silently — the exact failure mode this work exists to end.
+- **Never leave the child's stderr on an unread pipe.** `Process` with `standardError = Pipe()`
+  and no reader deadlocks as soon as clang emits more diagnostics than the buffer holds: it blocks
+  writing stderr, never closes stdout, and the stdout read waits forever. `FileHandle.nullDevice`.
+- **The probe's include path covers both header layouts** — the xcframework's flat `Headers/` and
+  a raw `pjproject` checkout's `<subproject>/include`, which is still a documented way to point
+  the generator at sources. Without the latter the probe fails on a raw tree and *every* guarded
+  member is omitted.
 
 ## Known defect: slice selection ignores the build platform (G2)
 

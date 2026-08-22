@@ -24,6 +24,25 @@ public func generateEnumConformances(
     }
 
     let filename = URL(fileURLWithPath: headerPath).lastPathComponent
+
+    // Resolve the TYPE's own guard first — see StructGenerator for why.
+    let debugPathEarly = "\(outputDir)/\(enumName)+CustomDebugStringConvertible.swift"
+    let stringPathEarly = "\(outputDir)/\(enumName)+CustomStringConvertible.swift"
+    switch resolveGuard(ppCondition, with: macros) {
+    case .emit:
+        break
+    case .omit:
+        let stub = absentTypeStub(enumName, guardedBy: ppCondition, resolved: true)
+        writeGenerated(stub, to: debugPathEarly)
+        writeGenerated(stub, to: stringPathEarly)
+        return
+    case .omitUnresolved(let condition):
+        reportUnresolvedGuard(condition: condition, member: nil, owner: enumName)
+        let stub = absentTypeStub(enumName, guardedBy: condition, resolved: false)
+        writeGenerated(stub, to: debugPathEarly)
+        writeGenerated(stub, to: stringPathEarly)
+        return
+    }
     let importBlock = imports.isEmpty
         ? ""
         : imports.map { "import \($0)" }.joined(separator: "\n") + "\n\n"
@@ -49,8 +68,8 @@ public func generateEnumConformances(
                 out += "        case \(c.name): \"\(c.name)\"\n"
             case .omit:
                 continue
-            case .omitUnresolved(let macro):
-                reportUnresolvedGuard(macro: macro, member: c.name, owner: enumName)
+            case .omitUnresolved(let condition):
+                reportUnresolvedGuard(condition: condition, member: c.name, owner: enumName)
             }
         }
         out += """
@@ -80,24 +99,8 @@ public func generateEnumConformances(
 
     // ── Conditional compilation wrapping ──
 
-    // Same rule for a type that is itself guarded — but the file must still be
-    // written, because the build-tool plugin declares its outputs up front and a
-    // missing file breaks that contract. So a type that does not exist in this
-    // binary yields a file that explains itself and declares nothing.
-    let wrappedDebug: String
-    let wrappedString: String
-    switch resolveGuard(ppCondition, with: macros) {
-    case .emit:
-        wrappedDebug = debugBody
-        wrappedString = stringBody
-    case .omit:
-        wrappedDebug = absentTypeStub(enumName, guardedBy: ppCondition, resolved: true)
-        wrappedString = wrappedDebug
-    case .omitUnresolved(let macro):
-        reportUnresolvedGuard(macro: macro, member: nil, owner: enumName)
-        wrappedDebug = absentTypeStub(enumName, guardedBy: macro, resolved: false)
-        wrappedString = wrappedDebug
-    }
+    let wrappedDebug = debugBody
+    let wrappedString = stringBody
 
     // ── Write ──
 

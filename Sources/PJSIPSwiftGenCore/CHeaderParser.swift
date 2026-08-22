@@ -21,6 +21,45 @@ func stripLineComment(_ line: String) -> String {
 
 // MARK: - Preprocessor
 
+/// The C condition a `#if`-family directive actually expresses, normalised so a
+/// preprocessor can evaluate it verbatim.
+///
+/// Recording only the first macro NAME (what `extractMacroName` does, and what this
+/// parser used to store) loses the operator: `#ifndef X`, `#if !X`, `#if X == 0` and
+/// `#if X < 2` all collapsed to "X". That was harmless while the name was emitted into
+/// an always-false Swift `#if`, but it is not harmless once a resolver treats the name
+/// as authoritative — an inverted guard over a truthy macro would emit a member the C
+/// preprocessor removes, which is a compile error in the consumer.
+///
+/// Returns text suitable for `#if <text>`; `nil` only when the directive carries no
+/// condition at all.
+func normalizedCondition(from directive: String) -> String? {
+    let d = directive.trimmingCharacters(in: .whitespaces)
+    func rest(after prefix: String) -> String {
+        String(d.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+    }
+    // Order matters: "#ifdef"/"#ifndef" must be tested before the "#if" prefix.
+    if d.hasPrefix("#ifndef") {
+        let name = rest(after: "#ifndef")
+        return name.isEmpty ? nil : "!defined(\(name))"
+    }
+    if d.hasPrefix("#ifdef") {
+        let name = rest(after: "#ifdef")
+        return name.isEmpty ? nil : "defined(\(name))"
+    }
+    if d.hasPrefix("#if") {
+        let expr = rest(after: "#if")
+        return expr.isEmpty ? nil : expr
+    }
+    return nil
+}
+
+/// A condition that no preprocessor can evaluate, used to mark a region whose guard this
+/// parser cannot attribute (the `#else` / `#elif` arms of a tracked `#if`). It forces the
+/// resolver down the "unresolved" path, so such members are omitted *and reported* rather
+/// than silently attributed to the opening condition — which would be its negation.
+let unresolvableCondition = "__PJGEN_UNRESOLVABLE_BRANCH__"
+
 func extractMacroName(from directive: String) -> String? {
     let pattern = #"[A-Z][A-Z0-9_]{2,}"#
     if let range = directive.range(of: pattern, options: .regularExpression) {
@@ -48,6 +87,7 @@ func parseStruct(named name: String, in source: String) -> [CField]? {
 
     var ppDepth = 0
     var ppCondition: String?
+    var ppOpening: String?
 
     for line in lines {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -56,17 +96,35 @@ func parseStruct(named name: String, in source: String) -> [CField]? {
             if trimmed.hasPrefix("#if") {
                 ppDepth += 1
                 if ppDepth == 1 {
-                    ppCondition = extractMacroName(from: trimmed)
+                    ppCondition = normalizedCondition(from: trimmed)
+                    ppOpening = ppCondition
                 }
                 continue
             }
             if trimmed.hasPrefix("#endif") {
                 ppDepth -= 1
-                if ppDepth == 0 { ppCondition = nil }
+                if ppDepth == 0 { ppCondition = nil; ppOpening = nil }
                 continue
             }
-            if trimmed.hasPrefix("#else")
-                || trimmed.hasPrefix("#elif") { continue }
+            if trimmed.hasPrefix("#elif") {
+                // An #elif arm holds only when every earlier arm did not, which this
+                // single-condition model cannot express. Poison the rest of the chain.
+                if ppDepth == 1 { ppCondition = unresolvableCondition
+                                  ppOpening = unresolvableCondition }
+                continue
+            }
+            if trimmed.hasPrefix("#else") {
+                // The #else arm holds exactly when the opening condition does not, so it
+                // IS resolvable — which matters: pj_math_stat puts `fmean_` under
+                // `#if PJ_HAS_FLOATING_POINT` and `mean_res_` under its `#else`, and
+                // exactly one of them is in the binary.
+                if ppDepth == 1 {
+                    ppCondition = ppOpening.map {
+                        $0 == unresolvableCondition ? $0 : "!(\($0))"
+                    }
+                }
+                continue
+            }
         }
 
         let code = stripLineComment(line)
@@ -186,6 +244,7 @@ func parseEnum(named enumName: String, in source: String) -> [CCase]? {
 
     var ppDepth = 0
     var ppCondition: String?
+    var ppOpening: String?
 
     for line in lines {
         let raw = line.trimmingCharacters(in: .whitespaces)
@@ -194,16 +253,28 @@ func parseEnum(named enumName: String, in source: String) -> [CCase]? {
             if raw.hasPrefix("#if") {
                 ppDepth += 1
                 if ppDepth == 1 {
-                    ppCondition = extractMacroName(from: raw)
+                    ppCondition = normalizedCondition(from: raw)
+                    ppOpening = ppCondition
                 }
                 continue
             }
             if raw.hasPrefix("#endif") {
                 ppDepth -= 1
-                if ppDepth == 0 { ppCondition = nil }
+                if ppDepth == 0 { ppCondition = nil; ppOpening = nil }
                 continue
             }
-            if raw.hasPrefix("#else") || raw.hasPrefix("#elif") {
+            if raw.hasPrefix("#elif") {
+                if ppDepth == 1 { ppCondition = unresolvableCondition
+                                  ppOpening = unresolvableCondition }
+                continue
+            }
+            if raw.hasPrefix("#else") {
+                // See parseStruct: the #else arm is the negation, and resolvable.
+                if ppDepth == 1 {
+                    ppCondition = ppOpening.map {
+                        $0 == unresolvableCondition ? $0 : "!(\($0))"
+                    }
+                }
                 continue
             }
         }
@@ -258,6 +329,10 @@ struct CountArrayPair {
     let arrayField: String
     let elementType: String
     let ppCondition: String?
+    /// The ARRAY field's own guard, which can differ from the count field's. Both must
+    /// hold before the pair may be emitted: emitting on the count's guard alone can
+    /// reference an array that is not in the binary.
+    let arrayPPCondition: String?
 }
 
 func matchPairs(from fields: [CField]) -> [CountArrayPair] {
@@ -288,7 +363,8 @@ func matchPairs(from fields: [CField]) -> [CountArrayPair] {
                 countField: cf.name,
                 arrayField: af.name,
                 elementType: af.type,
-                ppCondition: cf.ppCondition ?? af.ppCondition
+                ppCondition: cf.ppCondition,
+                arrayPPCondition: af.ppCondition
             ))
         }
     }
