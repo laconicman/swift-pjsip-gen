@@ -34,13 +34,13 @@ public func generateEnumConformances(
     case .omit:
         let stub = absentTypeStub(enumName, guardedBy: ppCondition, resolved: true)
         writeGenerated(stub, to: debugPathEarly)
-        writeGenerated(stub, to: stringPathEarly)
+        writeGeneratedUnlessOverridden(stub, to: stringPathEarly)
         return
     case .omitUnresolved(let condition):
         reportUnresolvedGuard(condition: condition, member: nil, owner: enumName)
         let stub = absentTypeStub(enumName, guardedBy: condition, resolved: false)
         writeGenerated(stub, to: debugPathEarly)
-        writeGenerated(stub, to: stringPathEarly)
+        writeGeneratedUnlessOverridden(stub, to: stringPathEarly)
         return
     }
     let importBlock = imports.isEmpty
@@ -109,12 +109,5 @@ public func generateEnumConformances(
 
     writeGenerated(wrappedDebug, to: debugPath)
 
-    if FileManager.default.fileExists(atPath: stringPath),
-       let existing = try? String(
-           contentsOfFile: stringPath, encoding: .utf8),
-       !existing.hasPrefix(autoGenMarker) {
-        fputs("  Skipped (overridden): \(stringPath)\n", stderr)
-    } else {
-        writeGenerated(wrappedString, to: stringPath)
-    }
+    writeGeneratedUnlessOverridden(wrappedString, to: stringPath)
 }

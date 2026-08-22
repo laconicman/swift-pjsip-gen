@@ -291,6 +291,63 @@ final class PJSIPSwiftGenCoreTests: XCTestCase {
         XCTAssertEqual(fields?.first(where: { $0.name == "c" })?.ppCondition, unresolvableCondition)
     }
 
+    /// A guarded-out type must not clobber a hand-written conformance. When the guard is
+    /// merely *unresolvable* the type may well exist, so replacing someone's real file with
+    /// an empty stub would be a worse failure than the one this all fixes.
+    func testStubDoesNotOverwriteAHandWrittenOverride() throws {
+        let header = """
+        typedef struct guarded_thing {
+            int field;
+        } guarded_thing;
+        """
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try header.write(toFile: "\(dir)/g.h", atomically: true, encoding: .utf8)
+
+        let outputPath = "\(dir)/guarded_thing+CustomStringConvertible.swift"
+        let handWritten = "// mine, not generated\nextension guarded_thing {}\n"
+        try handWritten.write(toFile: outputPath, atomically: true, encoding: .utf8)
+
+        // No resolver, so the type guard is unresolvable and the stub path is taken.
+        generateStructConformance(
+            structName: "guarded_thing",
+            headerPath: "\(dir)/g.h",
+            outputDir: dir,
+            ppCondition: "SOME_FEATURE",
+            macros: nil
+        )
+
+        XCTAssertEqual(try String(contentsOfFile: outputPath, encoding: .utf8), handWritten)
+    }
+
+    /// A type's guard must be normalised exactly like a member's — `scanHeaders` keeping the
+    /// bare macro name inverted every `#ifndef`-guarded type.
+    func testTypeLevelIfndefGuardIsNotInverted() throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let header = """
+        #ifndef MY_HEADER_H_
+        #define MY_HEADER_H_
+        #ifndef FEATURE_OFF
+        typedef struct only_when_off { int a; } only_when_off;
+        #endif
+        #endif
+        """
+        try header.write(toFile: "\(root)/h.h", atomically: true, encoding: .utf8)
+
+        let json = """
+        {"searchRoots": [""], "rootTypes": ["only_when_off"],
+         "skipTypes": [], "manualTypes": []}
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(PJSIPSwiftGenConfig.self, from: json)
+        let found = discoverTypes(config: config, pjprojectRoot: root)
+
+        // The include guard must not be mistaken for a feature guard, and the real guard
+        // must keep its negation.
+        XCTAssertEqual(found.structs.first(where: { $0.name == "only_when_off" })?.ppCondition,
+                       "!defined(FEATURE_OFF)")
+    }
+
     private func makeTempDir() throws -> String {
         let dir = NSTemporaryDirectory() + "pjsipgen-test-" + UUID().uuidString
         try FileManager.default.createDirectory(

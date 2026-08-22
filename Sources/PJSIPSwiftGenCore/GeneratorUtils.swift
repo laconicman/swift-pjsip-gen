@@ -9,6 +9,22 @@ func writeGenerated(_ content: String, to path: String) {
     }
 }
 
+/// Writes a generated file unless the existing one is a hand-written override.
+///
+/// A file that does not start with the auto-gen marker was written by a human and is left
+/// alone. This matters most for the guarded-out stubs: when a guard is merely
+/// *unresolvable* the type may well exist, and clobbering someone's real conformance with
+/// an empty stub would be a worse failure than the one being fixed.
+func writeGeneratedUnlessOverridden(_ content: String, to path: String) {
+    if FileManager.default.fileExists(atPath: path),
+       let existing = try? String(contentsOfFile: path, encoding: .utf8),
+       !existing.hasPrefix(autoGenMarker) {
+        fputs("  Skipped (overridden): \(path)\n", stderr)
+        return
+    }
+    writeGenerated(content, to: path)
+}
+
 // MARK: - Guarded members
 
 /// Marker every generated file starts with. A file lacking it is treated as a

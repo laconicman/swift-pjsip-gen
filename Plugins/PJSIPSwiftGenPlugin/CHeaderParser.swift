@@ -60,6 +60,11 @@ func normalizedCondition(from directive: String) -> String? {
 /// than silently attributed to the opening condition — which would be its negation.
 let unresolvableCondition = "__PJGEN_UNRESOLVABLE_BRANCH__"
 
+/// Note on nesting: only the OUTERMOST `#if` around a member is recorded (`ppDepth == 1`).
+/// A member nested two levels deep carries just the outer condition, so it can be emitted
+/// when the inner one is false. No such nesting exists in the headers generated from today;
+/// recording the conjunction would be the fix if it ever appears.
+
 func extractMacroName(from directive: String) -> String? {
     let pattern = #"[A-Z][A-Z0-9_]{2,}"#
     if let range = directive.range(of: pattern, options: .regularExpression) {

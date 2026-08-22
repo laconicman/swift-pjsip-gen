@@ -82,6 +82,12 @@ public final class MacroResolver {
     /// The config headers alone carry every macro that can guard a member and — unlike
     /// `<pjsua.h>` — preprocess without an SDK sysroot or target triple, so one form works
     /// for any slice from any host.
+    ///
+    /// Every include is **mandatory on purpose**. Wrapping them in `__has_include` would
+    /// let the probe succeed with, say, `pjmedia/config.h` missing — and then every
+    /// `PJMEDIA_*` condition would quietly evaluate to 0, because C reads an undefined
+    /// identifier in `#if` as 0. That is a confident wrong answer. Failing the whole probe
+    /// instead costs the guarded members (they are omitted) but says so, once, out loud.
     private func evaluateUncached(_ condition: String) -> Bool? {
         let source = """
         #define PJ_AUTOCONF 1

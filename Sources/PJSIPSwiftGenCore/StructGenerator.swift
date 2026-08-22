@@ -31,13 +31,15 @@ public func generateStructConformance(
     case .emit:
         break
     case .omit:
-        writeGenerated(absentTypeStub(structName, guardedBy: ppCondition, resolved: true),
-                       to: "\(outputDir)/\(structName)+CustomStringConvertible.swift")
+        writeGeneratedUnlessOverridden(
+            absentTypeStub(structName, guardedBy: ppCondition, resolved: true),
+            to: "\(outputDir)/\(structName)+CustomStringConvertible.swift")
         return
     case .omitUnresolved(let condition):
         reportUnresolvedGuard(condition: condition, member: nil, owner: structName)
-        writeGenerated(absentTypeStub(structName, guardedBy: condition, resolved: false),
-                       to: "\(outputDir)/\(structName)+CustomStringConvertible.swift")
+        writeGeneratedUnlessOverridden(
+            absentTypeStub(structName, guardedBy: condition, resolved: false),
+            to: "\(outputDir)/\(structName)+CustomStringConvertible.swift")
         return
     }
 
@@ -131,12 +133,6 @@ public func generateStructConformance(
 
     let outputPath = "\(outputDir)/\(structName)+CustomStringConvertible.swift"
 
-    if FileManager.default.fileExists(atPath: outputPath),
-       let existing = try? String(
-           contentsOfFile: outputPath, encoding: .utf8),
-       !existing.hasPrefix(autoGenMarker) {
-        fputs("  Skipped (overridden): \(outputPath)\n", stderr)
-    } else {
-        writeGenerated(out, to: outputPath)
-    }
+    writeGeneratedUnlessOverridden(out, to: outputPath)
+
 }
