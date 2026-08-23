@@ -241,6 +241,15 @@ final class PJSIPSwiftGenCoreTests: XCTestCase {
         if case .omitUnresolved = resolveGuards(["ON", unresolvableCondition], with: resolver) {} else {
             XCTFail("an unresolvable side must be reported, not silently omitted")
         }
+        // A DEFINITE omit dominates an unresolvable one: the member is absent either way, so
+        // there is nothing to report — and, since an unresolved guard now fails the build,
+        // reporting it here would fail a build over a member correctly left out.
+        if case .omit = resolveGuards(["OFF", unresolvableCondition], with: resolver) {} else {
+            XCTFail("a definite omit must win over an unresolvable guard")
+        }
+        if case .omit = resolveGuards([unresolvableCondition, "OFF"], with: resolver) {} else {
+            XCTFail("order must not change the verdict")
+        }
     }
 
     /// The `#else` arm holds exactly when the opening condition does not, so it must be

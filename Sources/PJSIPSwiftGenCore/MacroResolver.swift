@@ -203,15 +203,20 @@ public func resolveGuard(_ ppCondition: String?, with resolver: MacroResolver?) 
 }
 
 /// Combines the guards that must *all* hold before something may be emitted — a
-/// count+array pair, where the two fields can carry different conditions. Any non-`emit`
-/// wins, and an unresolved one is preferred as the outcome so it gets reported.
+/// count+array pair, where the two fields can carry different conditions.
+///
+/// A definite `.omit` **wins over** `.omitUnresolved`, and the ordering matters now that an
+/// unresolved guard fails the build: if one side says "definitely absent" and the other says
+/// "could not evaluate", the member is absent either way, and there is nothing to report or
+/// fail over. Only when nothing definitively omitted does an unresolved guard survive to be
+/// reported — that is the case where the answer genuinely changes what should be emitted.
 public func resolveGuards(_ conditions: [String?], with resolver: MacroResolver?) -> GuardOutcome {
     var outcome = GuardOutcome.emit
     for condition in conditions {
         switch resolveGuard(condition, with: resolver) {
         case .emit: continue
-        case .omitUnresolved(let c): return .omitUnresolved(condition: c)
-        case .omit: outcome = .omit
+        case .omit: return .omit
+        case .omitUnresolved(let c): outcome = .omitUnresolved(condition: c)
         }
     }
     return outcome
