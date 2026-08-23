@@ -104,6 +104,7 @@ public final class MacroResolver {
         #else
         __PJGEN_CONDITION_IS_FALSE__
         #endif
+        \(Self.definednessProbe(for: condition))
         """
 
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -123,7 +124,37 @@ public final class MacroResolver {
         let isTrue = out.contains("__PJGEN_CONDITION_IS_TRUE__")
         let isFalse = out.contains("__PJGEN_CONDITION_IS_FALSE__")
         guard isTrue != isFalse else { return nil }
+
+        // A bare `#if MACRO` whose MACRO is not defined ANYWHERE reachable is ambiguous:
+        // C says false, but so does a probe that simply never saw the header defining it.
+        // The config headers are where PJSIP's feature macros live, so an undefined one
+        // means the probe's scope is wrong more likely than the feature being off. Refuse
+        // rather than drop the member on a guess.
+        if Self.bareIdentifier(in: condition) != nil,
+           !out.contains("__PJGEN_MACRO_IS_DEFINED__") {
+            return nil
+        }
         return isTrue
+    }
+
+    /// The condition's single identifier, when the condition is exactly `SOME_MACRO` —
+    /// the overwhelmingly common form. Anything with operators, `defined(...)`, or literals
+    /// returns nil, because there the author has been explicit about undefinedness.
+    private static func bareIdentifier(in condition: String) -> String? {
+        let t = condition.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, t.first == "_" || t.first!.isLetter else { return nil }
+        guard t.allSatisfy({ $0 == "_" || $0.isLetter || $0.isNumber }) else { return nil }
+        return t
+    }
+
+    /// Emits a marker when a bare-identifier condition's macro is actually defined.
+    private static func definednessProbe(for condition: String) -> String {
+        guard let name = bareIdentifier(in: condition) else { return "" }
+        return """
+        #ifdef \(name)
+        __PJGEN_MACRO_IS_DEFINED__
+        #endif
+        """
     }
 
     private static func runClang(_ args: [String]) -> String? {

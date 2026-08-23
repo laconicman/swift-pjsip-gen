@@ -348,6 +348,56 @@ final class PJSIPSwiftGenCoreTests: XCTestCase {
                        "!defined(FEATURE_OFF)")
     }
 
+    /// `#if NEVER_DEFINED_ANYWHERE` is false in C, but it is also what a probe that never
+    /// saw the defining header produces. Since PJSIP's feature macros all live in the config
+    /// headers, an undefined bare macro means the probe's scope is wrong more likely than
+    /// the feature being off — so it must be refused, not silently dropped.
+    func testBareUndefinedMacroIsRefusedRatherThanReadAsFalse() throws {
+        let root = try makeHeaderRoot(defining: ["REAL_FEATURE": "0"])
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let resolver = MacroResolver(headersRoot: root)
+        try XCTSkipUnless(resolver.isResolved, "no usable clang for the preprocessor probe")
+
+        // Defined but zero: a real answer.
+        XCTAssertEqual(resolver.isEnabled("REAL_FEATURE"), false)
+        // Not defined at all: refuse.
+        XCTAssertNil(resolver.isEnabled("MACRO_NOBODY_DEFINES"))
+        // An explicit defined() test is the author being deliberate — answer it.
+        XCTAssertEqual(resolver.isEnabled("defined(MACRO_NOBODY_DEFINES)"), false)
+        XCTAssertEqual(resolver.isEnabled("!defined(MACRO_NOBODY_DEFINES)"), true)
+    }
+
+    /// scanHeaders pushes for every `#if` form. Requiring a trailing space meant a spaceless
+    /// `#if(X)` pushed nothing while its `#endif` still popped, misaligning the stack for
+    /// every later type in the file.
+    func testSpacelessIfDoesNotMisalignTheTypeGuardStack() throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let header = """
+        #ifndef GUARD_H_
+        #define GUARD_H_
+        #if(SOMETHING)
+        typedef struct inside_spaceless { int a; } inside_spaceless;
+        #endif
+        typedef struct after_it { int b; } after_it;
+        #endif
+        """
+        try header.write(toFile: "\(root)/h.h", atomically: true, encoding: .utf8)
+
+        let json = """
+        {"searchRoots": [""], "rootTypes": ["after_it", "inside_spaceless"],
+         "skipTypes": [], "manualTypes": []}
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(PJSIPSwiftGenConfig.self, from: json)
+        let found = discoverTypes(config: config, pjprojectRoot: root)
+
+        // The type after the spaceless block must be UNGUARDED. Before the fix the stack
+        // was popped once too often and this inherited a stale condition.
+        XCTAssertNil(found.structs.first(where: { $0.name == "after_it" })?.ppCondition)
+        XCTAssertEqual(found.structs.first(where: { $0.name == "inside_spaceless" })?.ppCondition,
+                       "(SOMETHING)")
+    }
+
     private func makeTempDir() throws -> String {
         let dir = NSTemporaryDirectory() + "pjsipgen-test-" + UUID().uuidString
         try FileManager.default.createDirectory(

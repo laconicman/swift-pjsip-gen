@@ -156,10 +156,10 @@ statistic.
 conditions only works for platform macros, and none of the four real cases is one;
 they are all build-configuration macros. But the value is knowable exactly: the
 generated code is compiled against *one* prebuilt binary whose `config_site.h`
-ships inside the same `Headers/` directory being parsed. `MacroResolver` runs
-`clang -E -dM` over the PJSIP config headers once (~5000 macros, one invocation)
-and the generators then **include or omit the member outright**. No `#if` appears
-in generated output at all.
+ships inside the same `Headers/` directory being parsed. `MacroResolver` hands each
+condition to `clang -E -P` inside a probe translation unit that includes the PJSIP config headers,
+reads back which of two markers survived, and memoises the answer per condition. The generators
+then **include or omit the member outright**. No `#if` appears in generated output at all.
 
 An earlier cut of this resolved the macro *name* and tested it for non-zero. Review caught that
 this is wrong for every inverted or comparing guard — `#ifndef X`, `#if !X`, `#if X == 0`,
@@ -197,6 +197,20 @@ Rules that fell out, and are worth keeping:
 - **Never leave the child's stderr on an unread pipe.** `Process` with `standardError = Pipe()`
   and no reader deadlocks as soon as clang emits more diagnostics than the buffer holds: it blocks
   writing stderr, never closes stdout, and the stdout read waits forever. `FileHandle.nullDevice`.
+- **An unresolvable guard fails the build.** A warning scrolls past; the thing being warned about
+  is precisely the silent incompleteness this work exists to end. `main` exits non-zero when the
+  run refused any guard — and only then, so a package with no guarded members is unaffected. This
+  matters most inside a SwiftPM plugin sandbox: upstream's profile does grant `(allow process*)`
+  and a writable temp dir (`Sources/Basics/Sandbox.swift`, with `testExecuteAllowed` /
+  `testWritingToTemporaryDirectoryAllowed` covering both), so the probe should work — but Xcode
+  layers its own User Script Sandboxing that SwiftPM's own functional test leaves unvalidated for
+  the `.xcode` driver. From inside, "the macro is off" and "I was blocked from asking" are
+  indistinguishable, so the tool must not choose between them silently.
+- **A bare `#if MACRO` whose macro is defined nowhere is refused, not read as false.** C says
+  false; so does a probe that never saw the defining header. PJSIP's feature macros live in the
+  config headers, so an undefined one means the probe's scope is more likely wrong than the
+  feature off. An explicit `defined(X)` test is the author being deliberate and is answered
+  normally.
 - **The probe's include path covers both header layouts** — the xcframework's flat `Headers/` and
   a raw `pjproject` checkout's `<subproject>/include`, which is still a documented way to point
   the generator at sources. Without the latter the probe fails on a raw tree and *every* guarded

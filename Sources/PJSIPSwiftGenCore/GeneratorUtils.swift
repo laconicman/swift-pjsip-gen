@@ -52,12 +52,24 @@ func absentTypeStub(_ typeName: String, guardedBy condition: String?, resolved: 
     """
 }
 
+/// Tally of guards this run could not evaluate.
+///
+/// Exists because a warning in a build log is easy to miss, and the thing being warned
+/// about is exactly the failure this generator was written to end. `main` turns a non-zero
+/// count into a non-zero exit, so a build that could not resolve its guards fails loudly
+/// instead of quietly shipping incomplete conformances.
+public enum GuardDiagnostics {
+    public static var unresolvedCount = 0
+    public static func reset() { unresolvedCount = 0 }
+}
+
 /// Reports a guard the preprocessor probe could not resolve.
 ///
 /// Always to stderr, never as a `#warning` in generated source — a `#warning`
 /// would fire on every consumer build forever for a condition only this
 /// generator can fix.
 func reportUnresolvedGuard(condition: String, member: String?, owner: String) {
+    GuardDiagnostics.unresolvedCount += 1
     let what = member.map { "\(owner).\($0)" } ?? owner
     fputs("  Warning: guard '#if \(condition)' on \(what) could not be evaluated; "
           + "omitted (the compiling direction). If it should be present, check the "

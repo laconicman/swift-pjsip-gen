@@ -123,10 +123,6 @@ private func scanHeaders(
             // recorded the same way: as the CONDITION, not the bare macro name. Keeping
             // only the name inverts every `#ifndef` / `#if !X` / `#if X == 0` guard, which
             // would emit a conformance for a type that is not in the binary.
-            if trimmed.hasPrefix("#if ") || trimmed.hasPrefix("#ifdef") {
-                ppStack.append(normalizedCondition(from: trimmed))
-                continue
-            }
             if trimmed.hasPrefix("#ifndef") {
                 // An include guard is not a feature guard — `#ifndef __FOO_H__` followed by
                 // `#define __FOO_H__` wraps the whole file and means nothing here.
@@ -137,6 +133,15 @@ private func scanHeaders(
                         .hasPrefix("#define")
                     && lines[i + 1].contains(macro!)
                 ppStack.append(isIncludeGuard ? nil : normalizedCondition(from: trimmed))
+                continue
+            }
+            // Every remaining #if form pushes — `#ifdef`, `#if X`, and the spaceless
+            // `#if(X)` alike. The old test required a trailing space, so a spaceless
+            // directive pushed nothing while its #endif still popped, misaligning the
+            // stack and mis-attributing guards to later types in the same file. (This
+            // also matches parseStruct/parseEnum, which have always used the loose test.)
+            if trimmed.hasPrefix("#if") {
+                ppStack.append(normalizedCondition(from: trimmed))
                 continue
             }
             if trimmed.hasPrefix("#endif") {

@@ -164,4 +164,21 @@ case .generate:
     }
 
     fputs("Done. Generated files in \(outputDir).\n", stderr)
+
+    // A guard we could not evaluate is NOT a warning to scroll past. Inside a SwiftPM
+    // plugin sandbox the tool cannot tell "the macro is off" from "I was blocked from
+    // asking" — SwiftPM's profile does allow process-exec and temp writes, but the Xcode
+    // driver layers its own script sandboxing that upstream's own tests do not cover. Both
+    // failure modes look identical from in here, and both produce silently incomplete
+    // output, which is the exact defect this generator exists to prevent. So: fail the
+    // build, and only when it actually bit (a run with no guarded members is unaffected).
+    if GuardDiagnostics.unresolvedCount > 0 {
+        fputs("""
+        Error: \(GuardDiagnostics.unresolvedCount) preprocessor guard(s) could not be \
+        evaluated, so the members behind them were omitted. Generated output would be \
+        incomplete. If clang is unavailable or sandboxed, or the headers directory is not \
+        a PJSIP headers root, fix that and re-run — do not ship this output.\n
+        """, stderr)
+        exit(1)
+    }
 }
