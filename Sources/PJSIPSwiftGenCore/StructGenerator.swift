@@ -2,6 +2,7 @@ import Foundation
 
 // MARK: - Struct conformance generation
 
+@discardableResult
 public func generateStructConformance(
     structName: String,
     headerPath: String,
@@ -9,18 +10,19 @@ public func generateStructConformance(
     imports: [String] = [],
     ppCondition: String? = nil,
     macros: MacroResolver? = nil
-) {
+) -> GuardReport {
+    var report = GuardReport()
     guard let rawSource = try? String(
         contentsOfFile: headerPath, encoding: .utf8
     ) else {
         fputs("  Error: cannot read '\(headerPath)'\n", stderr)
-        return
+        return report
     }
 
     let source = stripBlockComments(rawSource)
     guard let fields = parseStruct(named: structName, in: source) else {
         fputs("  Error: struct '\(structName)' not found in '\(headerPath)'\n", stderr)
-        return
+        return report
     }
 
     // Resolve the TYPE's own guard before anything else: if the type is not in this
@@ -34,13 +36,13 @@ public func generateStructConformance(
         writeGeneratedUnlessOverridden(
             absentTypeStub(structName, guardedBy: ppCondition, resolved: true),
             to: "\(outputDir)/\(structName)+CustomStringConvertible.swift")
-        return
+        return report
     case .omitUnresolved(let condition):
-        reportUnresolvedGuard(condition: condition, member: nil, owner: structName)
+        report.record(condition: condition, member: nil, owner: structName)
         writeGeneratedUnlessOverridden(
             absentTypeStub(structName, guardedBy: condition, resolved: false),
             to: "\(outputDir)/\(structName)+CustomStringConvertible.swift")
-        return
+        return report
     }
 
     let pairs = matchPairs(from: fields)
@@ -77,7 +79,7 @@ public func generateStructConformance(
             omittedFields.insert(p.arrayField)
             continue
         case .omitUnresolved(let condition):
-            reportUnresolvedGuard(condition: condition, member: p.arrayField, owner: structName)
+            report.record(condition: condition, member: p.arrayField, owner: structName)
             omittedFields.insert(p.arrayField)
             continue
         case .emit:
@@ -118,7 +120,7 @@ public func generateStructConformance(
         case .omit:
             continue
         case .omitUnresolved(let condition):
-            reportUnresolvedGuard(condition: condition, member: f.name, owner: structName)
+            report.record(condition: condition, member: f.name, owner: structName)
         }
     }
 
@@ -134,5 +136,6 @@ public func generateStructConformance(
     let outputPath = "\(outputDir)/\(structName)+CustomStringConvertible.swift"
 
     writeGeneratedUnlessOverridden(out, to: outputPath)
+    return report
 
 }

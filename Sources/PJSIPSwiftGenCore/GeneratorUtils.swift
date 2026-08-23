@@ -52,26 +52,38 @@ func absentTypeStub(_ typeName: String, guardedBy condition: String?, resolved: 
     """
 }
 
-/// Tally of guards this run could not evaluate.
+/// What one generator call refused, and why.
 ///
-/// Exists because a warning in a build log is easy to miss, and the thing being warned
-/// about is exactly the failure this generator was written to end. `main` turns a non-zero
-/// count into a non-zero exit, so a build that could not resolve its guards fails loudly
-/// instead of quietly shipping incomplete conformances.
-public enum GuardDiagnostics {
-    public static var unresolvedCount = 0
-    public static func reset() { unresolvedCount = 0 }
+/// Returned rather than accumulated in a global. The count decides whether the run fails
+/// the build, so it has to mean "this run" — a `static var` would carry one caller's
+/// refusals into the next call in the same process (the library is public, and the test
+/// suite is a single process), and would be a mutable shared global the moment generation
+/// is parallelised per type.
+public struct GuardReport {
+    /// One entry per member or type omitted because its guard could not be evaluated.
+    public private(set) var unresolved: [String] = []
+
+    public init() {}
+
+    public var isEmpty: Bool { unresolved.isEmpty }
+    public var count: Int { unresolved.count }
+
+    public static func + (lhs: GuardReport, rhs: GuardReport) -> GuardReport {
+        var merged = lhs
+        merged.unresolved += rhs.unresolved
+        return merged
+    }
+
+    /// Records a guard that could not be evaluated, and says so on stderr.
+    ///
+    /// Never a `#warning` in generated source — that would fire on every consumer build
+    /// forever for something only this generator can fix.
+    mutating func record(condition: String, member: String?, owner: String) {
+        let what = member.map { "\(owner).\($0)" } ?? owner
+        unresolved.append("\(what) (#if \(condition))")
+        fputs("  Warning: guard '#if \(condition)' on \(what) could not be evaluated; "
+              + "omitted (the compiling direction). If it should be present, check the "
+              + "headers dir passed to MacroResolver.\n", stderr)
+    }
 }
 
-/// Reports a guard the preprocessor probe could not resolve.
-///
-/// Always to stderr, never as a `#warning` in generated source — a `#warning`
-/// would fire on every consumer build forever for a condition only this
-/// generator can fix.
-func reportUnresolvedGuard(condition: String, member: String?, owner: String) {
-    GuardDiagnostics.unresolvedCount += 1
-    let what = member.map { "\(owner).\($0)" } ?? owner
-    fputs("  Warning: guard '#if \(condition)' on \(what) could not be evaluated; "
-          + "omitted (the compiling direction). If it should be present, check the "
-          + "headers dir passed to MacroResolver.\n", stderr)
-}

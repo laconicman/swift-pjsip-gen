@@ -141,8 +141,10 @@ case .generate:
               + "every guarded member will be omitted and reported.\n", stderr)
     }
 
+    var report = GuardReport()
+
     for enumType in result.enums where !manualSet.contains(enumType.name) {
-        generateEnumConformances(
+        report = report + generateEnumConformances(
             enumName: enumType.name,
             headerPath: enumType.headerPath,
             outputDir: outputDir,
@@ -153,7 +155,7 @@ case .generate:
     }
 
     for structType in result.structs where !manualSet.contains(structType.name) {
-        generateStructConformance(
+        report = report + generateStructConformance(
             structName: structType.name,
             headerPath: structType.headerPath,
             outputDir: outputDir,
@@ -172,12 +174,13 @@ case .generate:
     // failure modes look identical from in here, and both produce silently incomplete
     // output, which is the exact defect this generator exists to prevent. So: fail the
     // build, and only when it actually bit (a run with no guarded members is unaffected).
-    if GuardDiagnostics.unresolvedCount > 0 {
+    if !report.isEmpty {
         fputs("""
-        Error: \(GuardDiagnostics.unresolvedCount) preprocessor guard(s) could not be \
-        evaluated, so the members behind them were omitted. Generated output would be \
-        incomplete. If clang is unavailable or sandboxed, or the headers directory is not \
-        a PJSIP headers root, fix that and re-run — do not ship this output.\n
+        Error: \(report.count) preprocessor guard(s) could not be evaluated, so the members \
+        behind them were omitted and the generated output is incomplete. If clang is \
+        unavailable or sandboxed, or the headers directory is not a PJSIP headers root, fix \
+        that and re-run — do not ship this output.
+        \(report.unresolved.map { "  - " + $0 }.joined(separator: "\n"))\n
         """, stderr)
         exit(1)
     }

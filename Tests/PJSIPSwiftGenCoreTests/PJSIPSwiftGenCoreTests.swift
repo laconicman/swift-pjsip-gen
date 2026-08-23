@@ -407,6 +407,51 @@ final class PJSIPSwiftGenCoreTests: XCTestCase {
                        "(SOMETHING)")
     }
 
+    /// The refusal tally must belong to the CALL, not the process. It decides whether the
+    /// run fails the build, so a static counter would carry one caller's refusals into the
+    /// next call in the same process — which is every test in this suite, and any embedder
+    /// of the library.
+    func testGuardReportIsPerCallAndDoesNotAccumulate() throws {
+        let header = """
+        typedef struct tally_probe {
+            int always;
+        #if UNKNOWABLE_FEATURE
+            int guarded;
+        #endif
+        } tally_probe;
+        """
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try header.write(toFile: "\(dir)/t.h", atomically: true, encoding: .utf8)
+
+        // macros: nil, so the guard is unresolvable and gets recorded.
+        let first = generateStructConformance(
+            structName: "tally_probe", headerPath: "\(dir)/t.h", outputDir: dir, macros: nil
+        )
+        let second = generateStructConformance(
+            structName: "tally_probe", headerPath: "\(dir)/t.h", outputDir: dir, macros: nil
+        )
+
+        XCTAssertEqual(first.count, 1)
+        XCTAssertEqual(second.count, 1, "a second call must not inherit the first call's tally")
+        XCTAssertEqual((first + second).count, 2, "callers aggregate explicitly")
+        XCTAssertTrue(first.unresolved[0].contains("tally_probe.guarded"))
+    }
+
+    /// A run with nothing to refuse reports nothing — the build must not fail for a package
+    /// that simply has no guarded members.
+    func testGuardReportIsEmptyWhenNothingIsRefused() throws {
+        let header = "typedef struct plain_thing { int a; } plain_thing;"
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try header.write(toFile: "\(dir)/p.h", atomically: true, encoding: .utf8)
+
+        let report = generateStructConformance(
+            structName: "plain_thing", headerPath: "\(dir)/p.h", outputDir: dir, macros: nil
+        )
+        XCTAssertTrue(report.isEmpty)
+    }
+
     private func makeTempDir() throws -> String {
         let dir = NSTemporaryDirectory() + "pjsipgen-test-" + UUID().uuidString
         try FileManager.default.createDirectory(

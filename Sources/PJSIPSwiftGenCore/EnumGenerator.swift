@@ -2,6 +2,7 @@ import Foundation
 
 // MARK: - Enum conformance generation
 
+@discardableResult
 public func generateEnumConformances(
     enumName: String,
     headerPath: String,
@@ -9,18 +10,19 @@ public func generateEnumConformances(
     imports: [String] = [],
     ppCondition: String? = nil,
     macros: MacroResolver? = nil
-) {
+) -> GuardReport {
+    var report = GuardReport()
     guard let rawSource = try? String(
         contentsOfFile: headerPath, encoding: .utf8
     ) else {
         fputs("  Error: cannot read '\(headerPath)'\n", stderr)
-        return
+        return report
     }
 
     let source = stripBlockComments(rawSource)
     guard let cases = parseEnum(named: enumName, in: source) else {
         fputs("  Error: enum '\(enumName)' not found in '\(headerPath)'\n", stderr)
-        return
+        return report
     }
 
     let filename = URL(fileURLWithPath: headerPath).lastPathComponent
@@ -35,13 +37,13 @@ public func generateEnumConformances(
         let stub = absentTypeStub(enumName, guardedBy: ppCondition, resolved: true)
         writeGenerated(stub, to: debugPathEarly)
         writeGeneratedUnlessOverridden(stub, to: stringPathEarly)
-        return
+        return report
     case .omitUnresolved(let condition):
-        reportUnresolvedGuard(condition: condition, member: nil, owner: enumName)
+        report.record(condition: condition, member: nil, owner: enumName)
         let stub = absentTypeStub(enumName, guardedBy: condition, resolved: false)
         writeGenerated(stub, to: debugPathEarly)
         writeGeneratedUnlessOverridden(stub, to: stringPathEarly)
-        return
+        return report
     }
     let importBlock = imports.isEmpty
         ? ""
@@ -69,7 +71,7 @@ public func generateEnumConformances(
             case .omit:
                 continue
             case .omitUnresolved(let condition):
-                reportUnresolvedGuard(condition: condition, member: c.name, owner: enumName)
+                report.record(condition: condition, member: c.name, owner: enumName)
             }
         }
         out += """
@@ -110,4 +112,5 @@ public func generateEnumConformances(
     writeGenerated(wrappedDebug, to: debugPath)
 
     writeGeneratedUnlessOverridden(wrappedString, to: stringPath)
+    return report
 }
