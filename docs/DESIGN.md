@@ -206,11 +206,37 @@ Rules that fell out, and are worth keeping:
   layers its own User Script Sandboxing that SwiftPM's own functional test leaves unvalidated for
   the `.xcode` driver. From inside, "the macro is off" and "I was blocked from asking" are
   indistinguishable, so the tool must not choose between them silently.
+- **An undefined macro is refused in EVERY direction, not just the bare form.** The refusal
+  originally fired only for a condition that was exactly `SOME_MACRO`. An `#else` arm is recorded
+  as `!(X)`, where an undefined X reads as **true** — so the failure flipped from omitting a
+  member to *emitting* one the real preprocessor removed, which is a consumer compile error
+  rather than a silent gap. `pj_math_stat` has precisely that shape (`fmean_` under
+  `#if PJ_HAS_FLOATING_POINT`, `mean_res_` under its `#else`). The probe now checks that every
+  identifier the condition *evaluates* is defined, in one extra `#if` in the same translation
+  unit.
 - **A bare `#if MACRO` whose macro is defined nowhere is refused, not read as false.** C says
   false; so does a probe that never saw the defining header. PJSIP's feature macros live in the
   config headers, so an undefined one means the probe's scope is more likely wrong than the
   feature off. An explicit `defined(X)` test is the author being deliberate and is answered
   normally.
+- **The probe compiles as the slice, not as the host.** `PJ_AUTOCONF`-generated does not mean
+  "target-independent constants": `pj/compat/os_auto.h` carries a block that is copied verbatim
+  rather than templated, so it still contains a live
+  `#if defined(PJ_DARWINOS) … #include "TargetConditionals.h" #if TARGET_OS_IPHONE …` that is
+  re-evaluated by *whatever* compile includes it. Measured against the shipped 2.17 headers,
+  exactly three macros differ between a host probe and an iOS one — all absent on the host:
+  `PJ_IPHONE_OS_HAS_MULTITASKING_SUPPORT` (1), `PJ_GETADDRINFO_USE_CFHOST` (0),
+  `PJ_ACTIVESOCK_TCP_IPHONE_OS_BG` (0). (Confirmed independently by a DeepWiki consult against
+  `pjsip/pjproject`, which located the mechanism in `os_auto.h.in` and agreed the four macros we
+  actually depend on today are plain `#ifndef/#define` and therefore safe either way.)
+
+  `MacroResolver` therefore infers a target triple from the xcframework slice directory in the
+  headers path (`ios-arm64` → `arm64-apple-ios`, `ios-arm64_x86_64-simulator` →
+  `arm64-apple-ios-simulator`, …) and passes it to clang. Measured byte-identical to a full
+  `-target` + `-isysroot` compile, and identical with or without a version suffix, so no SDK path
+  and no deployment version are needed. A path that is not slice-shaped (a raw `pjproject`
+  checkout) gets no triple and falls back to the host, where the undefined-macro refusal is the
+  backstop.
 - **The probe's include path covers both header layouts** — the xcframework's flat `Headers/` and
   a raw `pjproject` checkout's `<subproject>/include`, which is still a documented way to point
   the generator at sources. Without the latter the probe fails on a raw tree and *every* guarded

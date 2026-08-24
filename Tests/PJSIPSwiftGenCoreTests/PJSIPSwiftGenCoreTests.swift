@@ -452,6 +452,111 @@ final class PJSIPSwiftGenCoreTests: XCTestCase {
         XCTAssertTrue(report.isEmpty)
     }
 
+    /// The undefined-macro refusal has to cover NEGATED conditions, not just a bare
+    /// `SOME_MACRO`. An `#else` arm is recorded as `!(X)`, and there an undefined X reads as
+    /// *true* — so the failure mode flips from omitting a member to EMITTING one the real
+    /// preprocessor removed, which is a consumer compile error. `pj_math_stat` has exactly
+    /// this shape: `fmean_` under `#if PJ_HAS_FLOATING_POINT`, `mean_res_` under its `#else`.
+    func testNegatedUndefinedMacroIsAlsoRefused() throws {
+        let root = try makeHeaderRoot(defining: ["REAL_FEATURE": "1"])
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let resolver = MacroResolver(headersRoot: root)
+        try XCTSkipUnless(resolver.isResolved, "no usable clang for the preprocessor probe")
+
+        // Defined: both directions answerable.
+        XCTAssertEqual(resolver.isEnabled("REAL_FEATURE"), true)
+        XCTAssertEqual(resolver.isEnabled("!(REAL_FEATURE)"), false)
+
+        // Undefined: refused in BOTH directions. Before the fix, `!(X)` returned true here.
+        XCTAssertNil(resolver.isEnabled("NOBODY_DEFINES_THIS"))
+        XCTAssertNil(resolver.isEnabled("!(NOBODY_DEFINES_THIS)"))
+        XCTAssertNil(resolver.isEnabled("!NOBODY_DEFINES_THIS"))
+
+        // A compound condition is refused if ANY evaluated macro is undefined.
+        XCTAssertNil(resolver.isEnabled("REAL_FEATURE && NOBODY_DEFINES_THIS"))
+        XCTAssertEqual(resolver.isEnabled("REAL_FEATURE && REAL_FEATURE"), true)
+
+        // `defined(...)` is the author asking the question explicitly — still answered.
+        XCTAssertEqual(resolver.isEnabled("defined(NOBODY_DEFINES_THIS)"), false)
+        XCTAssertEqual(resolver.isEnabled("!defined(NOBODY_DEFINES_THIS)"), true)
+        XCTAssertEqual(resolver.isEnabled("defined(REAL_FEATURE) && REAL_FEATURE"), true)
+    }
+
+    /// The identifier scan underneath that refusal.
+    func testEvaluatedIdentifiersExcludesDefinedArgumentsAndLiterals() {
+        func ids(_ c: String) -> [String] { MacroResolver.evaluatedIdentifiers(in: c) }
+        XCTAssertEqual(ids("FOO"), ["FOO"])
+        XCTAssertEqual(ids("!(FOO)"), ["FOO"])
+        XCTAssertEqual(ids("FOO == 0"), ["FOO"])
+        XCTAssertEqual(ids("FOO < 2 && BAR"), ["FOO", "BAR"])
+        XCTAssertEqual(ids("defined(FOO)"), [])
+        XCTAssertEqual(ids("!defined(FOO)"), [])
+        XCTAssertEqual(ids("defined(FOO) && BAR"), ["BAR"])
+        XCTAssertEqual(ids("1"), [])
+        XCTAssertEqual(ids("0x10 && FOO"), ["FOO"])
+    }
+
+    /// Some PJSIP config macros are decided by the compilation target, not by config_site.h,
+    /// so the probe has to compile as the slice or its macro universe differs from the real
+    /// build's. Measured on 2.17: PJ_IPHONE_OS_HAS_MULTITASKING_SUPPORT, PJ_GETADDRINFO_USE_CFHOST
+    /// and PJ_ACTIVESOCK_TCP_IPHONE_OS_BG exist under an iOS target and are absent on the host.
+    func testTargetTripleIsInferredFromTheSliceDirectory() {
+        func triple(_ p: String) -> String? { MacroResolver.targetTriple(forHeadersUnder: p) }
+
+        XCTAssertEqual(triple("/x/PJSIP.xcframework/ios-arm64/Headers"), "arm64-apple-ios")
+        XCTAssertEqual(triple("/x/PJSIP.xcframework/ios-arm64-simulator/Headers"),
+                       "arm64-apple-ios-simulator")
+        XCTAssertEqual(triple("/x/PJSIP.xcframework/macos-arm64/Headers"), "arm64-apple-macos")
+        // Apple writes multi-arch slices with underscores; arm64 wins when present.
+        XCTAssertEqual(triple("/x/PJSIP.xcframework/ios-arm64_x86_64-simulator/Headers"),
+                       "arm64-apple-ios-simulator")
+        XCTAssertEqual(triple("/x/PJSIP.xcframework/macos-x86_64/Headers"), "x86_64-apple-macos")
+        XCTAssertEqual(triple("/x/PJSIP.xcframework/ios-arm64-maccatalyst/Headers"),
+                       "arm64-apple-ios-macabi")
+        // Arch names contain underscores of their own; splitting on "_" mangled them.
+        XCTAssertEqual(MacroResolver.preferredArch(in: "x86_64"), "x86_64")
+        XCTAssertEqual(MacroResolver.preferredArch(in: "arm64_x86_64"), "arm64")
+        XCTAssertEqual(MacroResolver.preferredArch(in: "arm64_32"), "arm64_32")
+        XCTAssertEqual(MacroResolver.preferredArch(in: "arm64e"), "arm64e")
+
+        // A raw pjproject checkout is not a slice: no triple, and the probe falls back to the
+        // host with the undefined-macro refusal as the backstop.
+        XCTAssertNil(triple("/Users/me/pjproject/pjlib/include"))
+        XCTAssertNil(triple("/tmp/some-headers"))
+    }
+
+    /// The end-to-end consequence: a target-gated macro must resolve the way the real build
+    /// sees it, not the way the host does.
+    func testTargetGatedMacroResolvesAsTheSliceNotTheHost() throws {
+        let base = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        // Lay the fake headers out under a slice-shaped path so the triple is inferred.
+        let root = "\(base)/PJSIP.xcframework/ios-arm64/Headers"
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        for dir in ["pj", "pjlib-util", "pjnath", "pjmedia",
+                    "pjmedia-audiodev", "pjmedia-videodev", "pjmedia-codec", "pjsip"] {
+            try FileManager.default.createDirectory(atPath: "\(root)/\(dir)",
+                                                    withIntermediateDirectories: true)
+        }
+        // Mirrors how pjproject gates iOS-only config: on TargetConditionals, not config_site.
+        try """
+        #include <TargetConditionals.h>
+        #if TARGET_OS_IPHONE
+        #  define ONLY_ON_IOS 1
+        #endif
+        """.write(toFile: "\(root)/pj/config.h", atomically: true, encoding: .utf8)
+        for path in ["pjlib-util/config.h", "pjnath/config.h", "pjmedia/config.h",
+                     "pjmedia-audiodev/config.h", "pjmedia-videodev/config.h",
+                     "pjmedia-codec/config.h", "pjsip/sip_config.h"] {
+            try "".write(toFile: "\(root)/\(path)", atomically: true, encoding: .utf8)
+        }
+
+        let resolver = MacroResolver(headersRoot: root)
+        try XCTSkipUnless(resolver.isResolved, "no usable clang for the preprocessor probe")
+        XCTAssertEqual(resolver.isEnabled("ONLY_ON_IOS"), true,
+                       "an iOS-gated macro must read as the slice sees it, not the host")
+    }
+
     private func makeTempDir() throws -> String {
         let dir = NSTemporaryDirectory() + "pjsipgen-test-" + UUID().uuidString
         try FileManager.default.createDirectory(
