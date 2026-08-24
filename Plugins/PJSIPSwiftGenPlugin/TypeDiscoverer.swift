@@ -119,22 +119,49 @@ private func scanHeaders(
             let trimmed = lines[i]
                 .trimmingCharacters(in: .whitespaces)
 
-            if trimmed.hasPrefix("#if ") || trimmed.hasPrefix("#ifdef") {
-                ppStack.append(extractMacroName(from: trimmed))
-                continue
-            }
+            // A type's guard is resolved by clang exactly like a member's, so it must be
+            // recorded the same way: as the CONDITION, not the bare macro name. Keeping
+            // only the name inverts every `#ifndef` / `#if !X` / `#if X == 0` guard, which
+            // would emit a conformance for a type that is not in the binary.
             if trimmed.hasPrefix("#ifndef") {
+                // An include guard is not a feature guard — `#ifndef __FOO_H__` followed by
+                // `#define __FOO_H__` wraps the whole file and means nothing here.
                 let macro = extractMacroName(from: trimmed)
                 let isIncludeGuard = macro != nil
                     && i + 1 < lines.count
                     && lines[i + 1].trimmingCharacters(in: .whitespaces)
                         .hasPrefix("#define")
                     && lines[i + 1].contains(macro!)
-                ppStack.append(isIncludeGuard ? nil : macro)
+                ppStack.append(isIncludeGuard ? nil : normalizedCondition(from: trimmed))
+                continue
+            }
+            // Every remaining #if form pushes — `#ifdef`, `#if X`, and the spaceless
+            // `#if(X)` alike. The old test required a trailing space, so a spaceless
+            // directive pushed nothing while its #endif still popped, misaligning the
+            // stack and mis-attributing guards to later types in the same file. (This
+            // also matches parseStruct/parseEnum, which have always used the loose test.)
+            if trimmed.hasPrefix("#if") {
+                ppStack.append(normalizedCondition(from: trimmed))
                 continue
             }
             if trimmed.hasPrefix("#endif") {
                 if !ppStack.isEmpty { ppStack.removeLast() }
+                continue
+            }
+            if trimmed.hasPrefix("#elif") {
+                // Holds only when every earlier arm did not — inexpressible here.
+                if !ppStack.isEmpty { ppStack[ppStack.count - 1] = unresolvableCondition }
+                continue
+            }
+            if trimmed.hasPrefix("#else") {
+                // The negation of the opening condition, and so still resolvable — unless
+                // an include guard (nil) or an #elif already made it unattributable.
+                if !ppStack.isEmpty {
+                    let opening = ppStack[ppStack.count - 1]
+                    ppStack[ppStack.count - 1] = opening.map {
+                        $0 == unresolvableCondition ? $0 : "!(\($0))"
+                    } ?? unresolvableCondition
+                }
                 continue
             }
 

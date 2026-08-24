@@ -2,28 +2,49 @@ import Foundation
 
 // MARK: - Enum conformance generation
 
+@discardableResult
 public func generateEnumConformances(
     enumName: String,
     headerPath: String,
     outputDir: String,
     imports: [String] = [],
-    ppCondition: String? = nil
-) {
+    ppCondition: String? = nil,
+    macros: MacroResolver? = nil
+) -> GuardReport {
+    var report = GuardReport()
     guard let rawSource = try? String(
         contentsOfFile: headerPath, encoding: .utf8
     ) else {
         fputs("  Error: cannot read '\(headerPath)'\n", stderr)
-        return
+        return report
     }
 
     let source = stripBlockComments(rawSource)
     guard let cases = parseEnum(named: enumName, in: source) else {
         fputs("  Error: enum '\(enumName)' not found in '\(headerPath)'\n", stderr)
-        return
+        return report
     }
 
-    let autoGenMarker = "// Auto-generated"
     let filename = URL(fileURLWithPath: headerPath).lastPathComponent
+
+    // Resolve the TYPE's own guard first — see StructGenerator for why.
+    let debugPathEarly = "\(outputDir)/\(enumName)+CustomDebugStringConvertible.swift"
+    let stringPathEarly = "\(outputDir)/\(enumName)+CustomStringConvertible.swift"
+    switch resolveGuard(ppCondition, with: macros) {
+    case .emit:
+        break
+    case .omit:
+        let stub = absentTypeStub(enumName, guardedBy: ppCondition, resolved: true)
+        writeGenerated(stub, to: debugPathEarly)
+        writeGeneratedUnlessOverridden(stub, to: stringPathEarly)
+        return report
+    case .omitUnresolved(let condition):
+        report.record(condition: condition, member: nil, owner: enumName)
+        let stub = absentTypeStub(enumName, guardedBy: condition, resolved: false)
+        writeGenerated(stub, to: debugPathEarly)
+        writeGeneratedUnlessOverridden(stub, to: stringPathEarly)
+        return report
+    }
     let importBlock = imports.isEmpty
         ? ""
         : imports.map { "import \($0)" }.joined(separator: "\n") + "\n\n"
@@ -39,21 +60,19 @@ public func generateEnumConformances(
                 switch self {
 
         """
-        var currentCondition: String?
+        // A case guarded by a C macro is emitted only when that macro is really
+        // on in the binary these headers describe. It must NOT become a Swift
+        // `#if`: Swift cannot see C macros and reads the unknown identifier as
+        // false, which silently deleted the case. See MacroResolver.
         for c in cases {
-            if c.ppCondition != currentCondition {
-                if currentCondition != nil {
-                    out += "        #endif\n"
-                }
-                if let cond = c.ppCondition {
-                    out += "        #if \(cond)\n"
-                }
-                currentCondition = c.ppCondition
+            switch resolveGuard(c.ppCondition, with: macros) {
+            case .emit:
+                out += "        case \(c.name): \"\(c.name)\"\n"
+            case .omit:
+                continue
+            case .omitUnresolved(let condition):
+                report.record(condition: condition, member: c.name, owner: enumName)
             }
-            out += "        case \(c.name): \"\(c.name)\"\n"
-        }
-        if currentCondition != nil {
-            out += "        #endif\n"
         }
         out += """
                 default: "\\(rawValue)"
@@ -82,15 +101,8 @@ public func generateEnumConformances(
 
     // ── Conditional compilation wrapping ──
 
-    let wrappedDebug: String
-    let wrappedString: String
-    if let cond = ppCondition {
-        wrappedDebug = "#if \(cond)\n" + debugBody + "#endif\n"
-        wrappedString = "#if \(cond)\n" + stringBody + "#endif\n"
-    } else {
-        wrappedDebug = debugBody
-        wrappedString = stringBody
-    }
+    let wrappedDebug = debugBody
+    let wrappedString = stringBody
 
     // ── Write ──
 
@@ -99,12 +111,6 @@ public func generateEnumConformances(
 
     writeGenerated(wrappedDebug, to: debugPath)
 
-    if FileManager.default.fileExists(atPath: stringPath),
-       let existing = try? String(
-           contentsOfFile: stringPath, encoding: .utf8),
-       !existing.hasPrefix(autoGenMarker) {
-        fputs("  Skipped (overridden): \(stringPath)\n", stderr)
-    } else {
-        writeGenerated(wrappedString, to: stringPath)
-    }
+    writeGeneratedUnlessOverridden(wrappedString, to: stringPath)
+    return report
 }

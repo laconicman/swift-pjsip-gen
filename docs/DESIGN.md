@@ -138,6 +138,131 @@ drift becomes an explicit, reviewable version bump instead of a silent change.
    `-skipPackagePluginValidation`. Worth automating into any CI recipe that
    builds a consumer of this package.
 
+## Preprocessor guards on discovered members (the G1 fix)
+
+`CHeaderParser` records the innermost `#if` around each discovered enum case or
+struct field as a **C macro name**. Emitting that name into a Swift `#if` looks
+right and is not: Swift `#if` only knows conditions declared via `-D` /
+`swiftSettings`, and an unknown identifier there evaluates to **false**. Every
+guarded member was therefore deleted from the generated output — on every
+platform, silently, because the result still compiles.
+
+Measured against the shipped `swift-pjsip` headers: 4 guards across 156 generated
+files, of which one — `PJ_HAS_FLOATING_POINT`, value **1** — was wrongly dropping
+`pj_math_stat.fmean_` and `.mean_res_`, i.e. the mean of every jitter and RTT
+statistic.
+
+**The fix is to resolve the CONDITION, not to look up the macro.** Mapping macros to `os(iOS)`-style
+conditions only works for platform macros, and none of the four real cases is one;
+they are all build-configuration macros. But the value is knowable exactly: the
+generated code is compiled against *one* prebuilt binary whose `config_site.h`
+ships inside the same `Headers/` directory being parsed. `MacroResolver` hands each
+condition to `clang -E -P` inside a probe translation unit that includes the PJSIP config headers,
+reads back which of two markers survived, and memoises the answer per condition. The generators
+then **include or omit the member outright**. No `#if` appears in generated output at all.
+
+An earlier cut of this resolved the macro *name* and tested it for non-zero. Review caught that
+this is wrong for every inverted or comparing guard — `#ifndef X`, `#if !X`, `#if X == 0`,
+`#if X < 2` — where a truthy macro means the member is **absent**. Getting that backwards emits a
+member the preprocessor removed, which is a hard compile error in the consumer and strictly worse
+than the silent omission being fixed. It was not hypothetical: `pj_math_stat` puts `fmean_` under
+`#if PJ_HAS_FLOATING_POINT` and `mean_res_` under its `#else`, so the name-based version emitted
+both and produced code that would not compile.
+
+So the parser records what the directive *means* (`normalizedCondition`: `#ifdef X` →
+`defined(X)`, `#ifndef X` → `!defined(X)`, `#if EXPR` → `EXPR`), an `#else` arm records the
+negation of its opening condition, and clang evaluates the whole expression verbatim. Handing the
+condition to clang also disposes of non-integer macro values — `(1)`, hex, aliases — for free.
+
+An `#elif` arm holds only when every earlier arm did not, which this single-condition model cannot
+express; the rest of such a chain is marked unresolvable rather than guessed. None occur in the
+headers today.
+
+Rules that fell out, and are worth keeping:
+
+- **Unresolvable guard ⇒ omit, and say so on stderr.** Omitting is the compiling
+  direction (a member absent from the binary would be a consumer compile error);
+  silence is what made the original defect survive. Never a `#warning` in
+  generated source — that would fire on every consumer build forever for
+  something only the generator can fix.
+- **A guarded-out *type* still gets its file**, containing a comment explaining
+  why it is empty. Build-tool plugins declare `outputFiles` at plan time, so a
+  file that simply vanishes breaks the incremental contract (constraint 2 above).
+- **Anything that must all hold, resolves together.** A count+array pair carries two guards
+  (`CountArrayPair.ppCondition` and `.arrayPPCondition`); emitting on the count's alone can
+  reference an array field that was compiled out. `resolveGuards(_:with:)` lets either side veto.
+- **The unresolvable sentinel is refused before the preprocessor, not by it.** C treats an
+  undefined identifier in `#if` as `0`, so handing a sentinel to clang returns a confident
+  "false" and drops the member silently — the exact failure mode this work exists to end.
+- **Never leave the child's stderr on an unread pipe.** `Process` with `standardError = Pipe()`
+  and no reader deadlocks as soon as clang emits more diagnostics than the buffer holds: it blocks
+  writing stderr, never closes stdout, and the stdout read waits forever. `FileHandle.nullDevice`.
+- **An unresolvable guard fails the build.** A warning scrolls past; the thing being warned about
+  is precisely the silent incompleteness this work exists to end. `main` exits non-zero when the
+  run refused any guard — and only then, so a package with no guarded members is unaffected. This
+  matters most inside a SwiftPM plugin sandbox: upstream's profile does grant `(allow process*)`
+  and a writable temp dir (`Sources/Basics/Sandbox.swift`, with `testExecuteAllowed` /
+  `testWritingToTemporaryDirectoryAllowed` covering both), so the probe should work — but Xcode
+  layers its own User Script Sandboxing that SwiftPM's own functional test leaves unvalidated for
+  the `.xcode` driver. From inside, "the macro is off" and "I was blocked from asking" are
+  indistinguishable, so the tool must not choose between them silently.
+- **An undefined macro is refused in EVERY direction, not just the bare form.** The refusal
+  originally fired only for a condition that was exactly `SOME_MACRO`. An `#else` arm is recorded
+  as `!(X)`, where an undefined X reads as **true** — so the failure flipped from omitting a
+  member to *emitting* one the real preprocessor removed, which is a consumer compile error
+  rather than a silent gap. `pj_math_stat` has precisely that shape (`fmean_` under
+  `#if PJ_HAS_FLOATING_POINT`, `mean_res_` under its `#else`). The probe now checks that every
+  identifier the condition *evaluates* is defined, in one extra `#if` in the same translation
+  unit.
+- **A bare `#if MACRO` whose macro is defined nowhere is refused, not read as false.** C says
+  false; so does a probe that never saw the defining header. PJSIP's feature macros live in the
+  config headers, so an undefined one means the probe's scope is more likely wrong than the
+  feature off. An explicit `defined(X)` test is the author being deliberate and is answered
+  normally.
+- **The probe compiles as the slice, not as the host.** `PJ_AUTOCONF`-generated does not mean
+  "target-independent constants": `pj/compat/os_auto.h` carries a block that is copied verbatim
+  rather than templated, so it still contains a live
+  `#if defined(PJ_DARWINOS) … #include "TargetConditionals.h" #if TARGET_OS_IPHONE …` that is
+  re-evaluated by *whatever* compile includes it. Measured against the shipped 2.17 headers,
+  exactly three macros differ between a host probe and an iOS one — all absent on the host:
+  `PJ_IPHONE_OS_HAS_MULTITASKING_SUPPORT` (1), `PJ_GETADDRINFO_USE_CFHOST` (0),
+  `PJ_ACTIVESOCK_TCP_IPHONE_OS_BG` (0). (Confirmed independently by a DeepWiki consult against
+  `pjsip/pjproject`, which located the mechanism in `os_auto.h.in` and agreed the four macros we
+  actually depend on today are plain `#ifndef/#define` and therefore safe either way.)
+
+  `MacroResolver` therefore infers a target triple from the xcframework slice directory in the
+  headers path (`ios-arm64` → `arm64-apple-ios`, `ios-arm64_x86_64-simulator` →
+  `arm64-apple-ios-simulator`, …) and passes it to clang. Measured byte-identical to a full
+  `-target` + `-isysroot` compile, and identical with or without a version suffix, so no SDK path
+  and no deployment version are needed. A path that is not slice-shaped (a raw `pjproject`
+  checkout) gets no triple and falls back to the host, where the undefined-macro refusal is the
+  backstop.
+- **The probe's include path covers both header layouts** — the xcframework's flat `Headers/` and
+  a raw `pjproject` checkout's `<subproject>/include`, which is still a documented way to point
+  the generator at sources. Without the latter the probe fails on a raw tree and *every* guarded
+  member is omitted.
+
+## Known defect: slice selection ignores the build platform (G2)
+
+`firstSlice()` (`Plugins/PJSIPSwiftGenPlugin/Plugin.swift`) picks the
+**alphabetically first** xcframework slice directory containing `Headers/`. Today
+the artifact ships `ios-arm64` and `ios-arm64-simulator`, so that is correct **by
+accident**.
+
+The moment `swift-pjsip` adds the planned `macos-arm64` slice, `"ios-arm64"` still
+sorts first — so **a macOS build would generate Swift from the iOS headers** and
+look fine doing it. With G1 fixed this is now the *only* silent wrongness left in
+the pipeline, and it is worse than it looks: `MacroResolver` would then resolve
+guards against the iOS `config_site.h` while compiling against the macOS binary,
+turning a header mismatch into member-level mismatches.
+
+Not fixed here — this branch is deliberately scoped to G1, which is live on iOS
+today and independently valuable. The fix, when the macOS slice lands: map
+`PluginContext`'s target platform to the slice's `SupportedPlatform` /
+`SupportedPlatformVariant` from the xcframework `Info.plist` rather than sorting
+names. Do **not** vary the *output file set* by platform — outputs are declared at
+plan time (constraint 2); vary the contents.
+
 ## Verification practices that proved out
 
 - Run the executable end-to-end against the real `swift-pjsip` xcframework

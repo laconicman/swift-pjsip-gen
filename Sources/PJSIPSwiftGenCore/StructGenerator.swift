@@ -2,28 +2,50 @@ import Foundation
 
 // MARK: - Struct conformance generation
 
+@discardableResult
 public func generateStructConformance(
     structName: String,
     headerPath: String,
     outputDir: String,
     imports: [String] = [],
-    ppCondition: String? = nil
-) {
+    ppCondition: String? = nil,
+    macros: MacroResolver? = nil
+) -> GuardReport {
+    var report = GuardReport()
     guard let rawSource = try? String(
         contentsOfFile: headerPath, encoding: .utf8
     ) else {
         fputs("  Error: cannot read '\(headerPath)'\n", stderr)
-        return
+        return report
     }
 
     let source = stripBlockComments(rawSource)
     guard let fields = parseStruct(named: structName, in: source) else {
         fputs("  Error: struct '\(structName)' not found in '\(headerPath)'\n", stderr)
-        return
+        return report
+    }
+
+    // Resolve the TYPE's own guard before anything else: if the type is not in this
+    // binary, emit the stub and stop. Walking the members first would print a warning per
+    // member for a type that produces no members at all.
+    let typeGuard = resolveGuard(ppCondition, with: macros)
+    switch typeGuard {
+    case .emit:
+        break
+    case .omit:
+        writeGeneratedUnlessOverridden(
+            absentTypeStub(structName, guardedBy: ppCondition, resolved: true),
+            to: "\(outputDir)/\(structName)+CustomStringConvertible.swift")
+        return report
+    case .omitUnresolved(let condition):
+        report.record(condition: condition, member: nil, owner: structName)
+        writeGeneratedUnlessOverridden(
+            absentTypeStub(structName, guardedBy: condition, resolved: false),
+            to: "\(outputDir)/\(structName)+CustomStringConvertible.swift")
+        return report
     }
 
     let pairs = matchPairs(from: fields)
-    let autoGenMarker = "// Auto-generated"
     let filename = URL(fileURLWithPath: headerPath).lastPathComponent
 
     var out = "\(autoGenMarker) from \(filename). DO NOT EDIT MANUALLY.\n"
@@ -44,23 +66,33 @@ public func generateStructConformance(
     out += "extension \(structName): @retroactive CustomStringConvertible {\n"
     out += "    public var description: String {\n"
 
+    // Guarded members are resolved against the binary's own config_site.h rather
+    // than emitted as Swift `#if`, which cannot see C macros and silently reads
+    // them as false. See MacroResolver.
+    var omittedFields = Set<String>()
     for p in pairs {
-        if let cond = p.ppCondition {
-            out += "        #if \(cond)\n"
+        // BOTH guards must hold. The count field's alone is not enough: when the array
+        // carries a different condition and is compiled out, emitting on the count's
+        // guard produces `tupleToArray(<array>, …)` for a field that does not exist.
+        switch resolveGuards([p.ppCondition, p.arrayPPCondition], with: macros) {
+        case .omit:
+            omittedFields.insert(p.arrayField)
+            continue
+        case .omitUnresolved(let condition):
+            report.record(condition: condition, member: p.arrayField, owner: structName)
+            omittedFields.insert(p.arrayField)
+            continue
+        case .emit:
+            break
         }
         out += "        let \(p.arrayField)Slice = tupleToArray(\n"
         out += "            \(p.arrayField),\n"
         out += "            count: Int(\(p.countField)),\n"
         out += "            as: \(p.elementType).self\n"
         out += "        )\n"
-        if p.ppCondition != nil {
-            out += "        #endif\n"
-        }
     }
 
     out += "        var parts: [String] = []\n"
-
-    var currentCondition: String?
 
     for f in fields {
         let emitsCode: Bool
@@ -80,22 +112,16 @@ public func generateStructConformance(
             emitsCode = true
         }
 
-        if emitsCode {
-            if f.ppCondition != currentCondition {
-                if currentCondition != nil {
-                    out += "        #endif\n"
-                }
-                if let cond = f.ppCondition {
-                    out += "        #if \(cond)\n"
-                }
-                currentCondition = f.ppCondition
-            }
-            out += line
-        }
-    }
+        guard emitsCode, !omittedFields.contains(f.name) else { continue }
 
-    if currentCondition != nil {
-        out += "        #endif\n"
+        switch resolveGuard(f.ppCondition, with: macros) {
+        case .emit:
+            out += line
+        case .omit:
+            continue
+        case .omitUnresolved(let condition):
+            report.record(condition: condition, member: f.name, owner: structName)
+        }
     }
 
     out += "        return \"\(structName)(\""
@@ -104,20 +130,12 @@ public func generateStructConformance(
     out += "    }\n"
     out += "}\n"
 
-    if let cond = ppCondition {
-        out = "#if \(cond)\n" + out + "#endif\n"
-    }
 
     // ── Write ──
 
     let outputPath = "\(outputDir)/\(structName)+CustomStringConvertible.swift"
 
-    if FileManager.default.fileExists(atPath: outputPath),
-       let existing = try? String(
-           contentsOfFile: outputPath, encoding: .utf8),
-       !existing.hasPrefix(autoGenMarker) {
-        fputs("  Skipped (overridden): \(outputPath)\n", stderr)
-    } else {
-        writeGenerated(out, to: outputPath)
-    }
+    writeGeneratedUnlessOverridden(out, to: outputPath)
+    return report
+
 }
