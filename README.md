@@ -4,6 +4,7 @@
 [![Platforms](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Flaconicman%2Fswift-pjsip-gen%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/laconicman/swift-pjsip-gen)
 [![Latest tag](https://img.shields.io/github/v/tag/laconicman/swift-pjsip-gen?label=release&sort=semver)](https://github.com/laconicman/swift-pjsip-gen/tags)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/laconicman/swift-pjsip-gen)
 
 **Swift code generation for PJSIP's C API.** SwiftPM plugins that parse the PJSIP
 headers your app actually builds against — sourced from
