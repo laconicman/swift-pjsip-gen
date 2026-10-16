@@ -87,6 +87,110 @@ final class PJSIPSwiftGenCoreTests: XCTestCase {
         XCTAssertTrue(names.isEmpty)
     }
 
+    // MARK: - Count+array pairs (#4)
+
+    /// A generated struct description must compile with nothing but the C module: the
+    /// fixed-array helper ships in the file. Compiled for real against a C header, so the
+    /// array arrives as the importer's homogeneous tuple — and next to a consumer's own
+    /// `tupleToArray(_:count:as:)`, the helper consumers had to write before, which the
+    /// shipped one must neither call nor collide with.
+    func testCountArrayPairCompilesWithTheShippedHelper() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let include = "\(dir)/include"
+        try FileManager.default.createDirectory(atPath: include, withIntermediateDirectories: true)
+        try """
+        typedef struct demo_item { int v; } demo_item;
+        typedef struct demo_list {
+            unsigned item_cnt;
+            demo_item item[4];
+        } demo_list;
+        """.write(toFile: "\(include)/demo.h", atomically: true, encoding: .utf8)
+        try "module Demo { header \"demo.h\" export * }\n"
+            .write(toFile: "\(include)/module.modulemap", atomically: true, encoding: .utf8)
+
+        generateStructConformance(
+            structName: "demo_list",
+            headerPath: "\(include)/demo.h",
+            outputDir: dir,
+            imports: ["Demo"]
+        )
+        let generated = "\(dir)/demo_list+CustomStringConvertible.swift"
+        let source = try String(contentsOfFile: generated, encoding: .utf8)
+        XCTAssertFalse(source.contains("Requires tupleToArray"), source)
+        XCTAssertTrue(source.contains("fileprivate func \(tupleHelperName)"), source)
+
+        try """
+        import Demo
+
+        func tupleToArray<T, E>(_ tuple: T, count: Int, as: E.Type) -> [E] {
+            fatalError("the consumer's helper must not be called")
+        }
+
+        var list = demo_list()
+        list.item_cnt = 2
+        list.item.0.v = 7
+        list.item.1.v = 8
+        list.item.2.v = 9
+        print(list.description)
+        """.write(toFile: "\(dir)/main.swift", atomically: true, encoding: .utf8)
+
+        let binary = "\(dir)/demo"
+        let compile = try run("/usr/bin/xcrun", [
+            "swiftc", "-I", include, "\(dir)/main.swift", generated, "-o", binary,
+        ])
+        XCTAssertEqual(compile.status, 0, "generated code did not compile:\n\(compile.output)")
+        guard compile.status == 0 else { return }
+
+        let output = try run(binary, []).output
+        XCTAssertTrue(output.contains("item: ["), output)
+        XCTAssertTrue(output.contains("v: 7") && output.contains("v: 8"), output)
+        XCTAssertFalse(output.contains("v: 9"), "count must cut the array:\n\(output)")
+    }
+
+    /// The helper follows the calls, not the pairs: when every pair is guarded out, the
+    /// file must not carry a helper nothing calls.
+    func testNoHelperWhenEveryPairIsOmitted() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try """
+        typedef struct guarded_list {
+            unsigned item_cnt;
+        #if DEMO_FEATURE_ON
+            int item[4];
+        #endif
+            int other;
+        } guarded_list;
+        """.write(toFile: "\(dir)/g.h", atomically: true, encoding: .utf8)
+
+        // No resolver: the array's guard is unresolvable, so the pair is omitted.
+        generateStructConformance(
+            structName: "guarded_list", headerPath: "\(dir)/g.h", outputDir: dir, macros: nil
+        )
+        let out = try String(
+            contentsOfFile: "\(dir)/guarded_list+CustomStringConvertible.swift", encoding: .utf8
+        )
+        XCTAssertTrue(out.contains("count+array pairs: item_cnt/item"), "no pair to omit:\n\(out)")
+        XCTAssertTrue(out.contains("other: "), out)
+        XCTAssertFalse(out.contains(tupleHelperName), out)
+    }
+
+    private func run(_ executable: String, _ arguments: [String]) throws
+        -> (status: Int32, output: String)
+    {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        // Read before waiting: a child that fills the pipe blocks until it is drained.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+
     // MARK: - Guarded members (G1)
 
     /// A C macro must never reach the generated Swift as an `#if` condition.
