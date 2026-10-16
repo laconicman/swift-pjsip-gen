@@ -455,6 +455,34 @@ final class PJSIPSwiftGenCoreTests: XCTestCase {
         }
     }
 
+    /// Empty lists are the remaining ways to run and find nothing: no root types can only
+    /// ever discover nothing, and no search roots leave every root type undeclared.
+    func testEmptyRootTypesOrSearchRootsFail() throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try "typedef struct present { int a; } present;"
+            .write(toFile: "\(root)/h.h", atomically: true, encoding: .utf8)
+        func config(searchRoots: [String], rootTypes: [String]) -> PJSIPSwiftGenConfig {
+            PJSIPSwiftGenConfig(pjprojectRoot: nil, searchRoots: searchRoots,
+                                rootTypes: rootTypes, skipTypes: [], manualTypes: [],
+                                imports: nil)
+        }
+
+        XCTAssertThrowsError(try discoverTypes(
+            config: config(searchRoots: [""], rootTypes: []), pjprojectRoot: root
+        )) { error in
+            guard case DiscoveryError.noRootTypes? = error as? DiscoveryError
+            else { return XCTFail("unexpected error: \(error)") }
+        }
+        XCTAssertThrowsError(try discoverTypes(
+            config: config(searchRoots: [], rootTypes: ["present"]), pjprojectRoot: root
+        )) { error in
+            guard case DiscoveryError.rootTypesNotFound(let entries)? = error as? DiscoveryError
+            else { return XCTFail("unexpected error: \(error)") }
+            XCTAssertEqual(entries, ["present"])
+        }
+    }
+
     /// The refusal tally must belong to the CALL, not the process. It decides whether the
     /// run fails the build, so a static counter would carry one caller's refusals into the
     /// next call in the same process — which is every test in this suite, and any embedder

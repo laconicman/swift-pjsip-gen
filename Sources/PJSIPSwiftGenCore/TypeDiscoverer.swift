@@ -31,13 +31,15 @@ public struct DiscoveryResult {
     }
 }
 
-/// A configuration entry that names nothing in the headers.
+/// A configuration that names nothing in the headers.
 ///
 /// Thrown rather than skipped: an entry that matches nothing used to produce an empty run
 /// that exited 0, so the consumer built without a single generated conformance and without
 /// a diagnostic. The usual cause is `searchRoots` written for a raw pjproject tree
 /// (`pjsip/include`, …) pointed at the xcframework's flat `Headers/`.
 public enum DiscoveryError: Error, CustomStringConvertible {
+    /// `rootTypes` is empty, so the run could only ever discover nothing.
+    case noRootTypes
     /// `searchRoots` entries with no directory under the headers root.
     case searchRootsNotFound([String], headersRoot: String)
     /// `rootTypes` entries that no scanned header declares.
@@ -45,6 +47,9 @@ public enum DiscoveryError: Error, CustomStringConvertible {
 
     public var description: String {
         switch self {
+        case .noRootTypes:
+            return "rootTypes is empty, so there is nothing to generate. Name at least one "
+                + "root type, or detach the plugin."
         case .searchRootsNotFound(let entries, let headersRoot):
             return "searchRoots \(entries.map { "'\($0)'" }.joined(separator: ", ")) "
                 + "not found under '\(headersRoot)'. The xcframework's Headers/ is flat: "
@@ -61,6 +66,7 @@ public func discoverTypes(
     config: PJSIPSwiftGenConfig,
     pjprojectRoot pjRoot: String
 ) throws -> DiscoveryResult {
+    guard !config.rootTypes.isEmpty else { throw DiscoveryError.noRootTypes }
     var typeMap: [String: (kind: TypeKind, headerPath: String, ppCondition: String?)] = [:]
     var missingSearchRoots: [String] = []
     for searchRoot in config.searchRoots {
