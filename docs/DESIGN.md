@@ -86,17 +86,31 @@ tests, just no longer load-bearing for the plugin.
 The generator needs the headers of the exact PJSIP build the consumer links.
 Resolution order, with a `Diagnostics.remark` trace at each branch:
 
-1. **SwiftPM contexts** — walk `context.package.dependencies` recursively for
-   the package whose manifest name is `PJSIP` (what `swift-pjsip/Package.swift`
-   declares), then read
-   `<checkout>/Binaries/PJSIP.xcframework/<first slice with Headers>/Headers`.
+1. **SwiftPM contexts** (package targets) — walk `context.package.dependencies`
+   recursively for the package whose manifest name is `PJSIP` (what
+   `swift-pjsip/Package.swift` declares), take its `PJSIP` binary target, and
+   read `<artifact>/<first slice with Headers>/Headers`, where `<artifact>` is
+   `BinaryArtifactTarget.artifact` (the tools-5.9 spelling; `artifactURL` from
+   6.0). The path is asked of SwiftPM rather than composed, because it moved:
+   swift-pjsip 0.1.x committed the xcframework to `Binaries/` in its checkout,
+   and from 0.2.1 it is a release asset that SwiftPM extracts to
+   `.build/artifacts/swift-pjsip/PJSIP/PJSIP.xcframework` (Xcode:
+   `SourcePackages/artifacts/…`). A path composed inside the checkout found
+   nothing for any swift-pjsip from 0.2.1 on; the artifact path is right for
+   both.
    The `<slice>/Headers` layout is the canonical, stable xcframework shape per
    Apple's ["Creating a multi-platform binary framework bundle"](https://developer.apple.com/documentation/xcode/creating-a-multi-platform-binary-framework-bundle).
-2. **Xcode contexts** — `XcodePluginContext` exposes **no** dependency-graph
-   API, so walk parent directories of the plugin work directory (which lives
-   inside the project's DerivedData) looking for
-   `SourcePackages/checkouts/swift-pjsip/Binaries/PJSIP.xcframework`. The
-   `SourcePackages/` directory sits next to `Build/` in DerivedData, so the
+2. **Xcode project targets** — `XcodePluginContext` exposes **no**
+   dependency-graph API, so walk parent directories of the plugin work
+   directory (which lives inside the project's DerivedData) looking under
+   `SourcePackages/` for, in order:
+   - `checkouts/swift-pjsip/Binaries/PJSIP.xcframework` — the committed binary
+     of swift-pjsip 0.1.x. A checkout always holds the resolved version, so a
+     binary found there is the one being linked.
+   - `artifacts/swift-pjsip/PJSIP/PJSIP.xcframework` — the release asset Xcode
+     extracts for the remote `.binaryTarget` of 0.2.1 and later.
+
+   The `SourcePackages/` directory sits next to `Build/` in DerivedData, so the
    walk-up terminates quickly.
 3. **Explicit escape hatch** — `pjprojectRoot` in `pjsip-swift-gen.json`,
    resolved relative to the config file. Also the way to point the generator at
