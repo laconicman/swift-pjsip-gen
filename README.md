@@ -78,8 +78,8 @@ targets: add it to the target, so the plugin sees it among the input files):
 
 | Key | Meaning |
 |-----|---------|
-| `searchRoots` | Subdirectories of the headers root to scan. `[""]` scans the whole tree — right for the xcframework's flat `Headers/`. |
-| `rootTypes` | Seed types; their struct fields are walked transitively to discover more. |
+| `searchRoots` | Subdirectories of the headers root to scan. `[""]` scans the whole tree — right for the xcframework's flat `Headers/`. An entry that does not exist fails the run. |
+| `rootTypes` | Seed types; their struct fields are walked transitively to discover more. An entry no scanned header declares fails the run. |
 | `skipTypes` | Never discover/generate these. |
 | `manualTypes` | Discovered but not generated — you maintain a hand-written extension. |
 | `imports` | Modules to import at the top of every generated file (e.g. `["PJSIP"]`). |

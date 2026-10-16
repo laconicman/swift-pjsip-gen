@@ -40,6 +40,7 @@ SwiftPM plugin constraints that shaped the package live in the repository's
 ### Type discovery
 
 - ``discoverTypes(config:pjprojectRoot:)``
+- ``DiscoveryError``
 - ``DiscoveryResult``
 - ``DiscoveredType``
 - ``TypeKind``
