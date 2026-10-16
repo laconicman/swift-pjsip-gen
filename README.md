@@ -112,8 +112,8 @@ Defaults: every target containing a `pjsip-swift-gen.json`, output to
 
 For an enum, a `debugDescription`/`description` that names the case; for a struct, a
 `description` summarizing its fields (with PJSIP's `count` + fixed-size-array pairs
-rendered as real collections — that path expects a small `tupleToArray(_:count:as:)`
-helper in the consuming module). Every file is marked auto-generated and
+rendered as real collections; the small helper that does it ships in the generated
+file). Every file is marked auto-generated and
 `#if`-guarded to mirror preprocessor conditions found in the headers.
 
 ```swift
@@ -182,7 +182,6 @@ Ideas under consideration — issues and PRs welcome:
   with `OptionSet` generation for flag-style enums.
 - Ergonomic `pj_str_t` ⇄ `String` bridging helpers.
 - Carry Doxygen comments from the headers into the generated declarations.
-- Ship the `tupleToArray` helper instead of expecting it from the consumer.
 - A minimal reproduction to retest whether the source duplication is still forced
   (see [`docs/DESIGN.md`](docs/DESIGN.md#open-questions)).
 

@@ -54,7 +54,6 @@ public func generateStructConformance(
             .map { "\($0.countField)/\($0.arrayField)" }
             .joined(separator: ", ")
         out += "// count+array pairs: \(pairDesc)\n"
-        out += "// Requires tupleToArray(_:count:as:) in the consuming module.\n"
     }
     out += "\n"
     for module in imports {
@@ -70,10 +69,11 @@ public func generateStructConformance(
     // than emitted as Swift `#if`, which cannot see C macros and silently reads
     // them as false. See MacroResolver.
     var omittedFields = Set<String>()
+    var emitsTupleHelper = false
     for p in pairs {
         // BOTH guards must hold. The count field's alone is not enough: when the array
         // carries a different condition and is compiled out, emitting on the count's
-        // guard produces `tupleToArray(<array>, …)` for a field that does not exist.
+        // guard produces a helper call on an array field that does not exist.
         switch resolveGuards([p.ppCondition, p.arrayPPCondition], with: macros) {
         case .omit:
             omittedFields.insert(p.arrayField)
@@ -85,11 +85,12 @@ public func generateStructConformance(
         case .emit:
             break
         }
-        out += "        let \(p.arrayField)Slice = tupleToArray(\n"
+        out += "        let \(p.arrayField)Slice = \(tupleHelperName)(\n"
         out += "            \(p.arrayField),\n"
         out += "            count: Int(\(p.countField)),\n"
         out += "            as: \(p.elementType).self\n"
         out += "        )\n"
+        emitsTupleHelper = true
     }
 
     out += "        var parts: [String] = []\n"
@@ -129,6 +130,9 @@ public func generateStructConformance(
     out += " + \")\"\n"
     out += "    }\n"
     out += "}\n"
+    if emitsTupleHelper {
+        out += "\n" + tupleHelperSource
+    }
 
 
     // ── Write ──
@@ -139,3 +143,33 @@ public func generateStructConformance(
     return report
 
 }
+
+// MARK: - Fixed-array helper
+
+/// The helper that renders a count+array pair, shipped in every struct file that calls it.
+///
+/// One `fileprivate` copy per file, so no file depends on another and nothing joins the
+/// plan-time output list. The name is the generator's own because `fileprivate` alone does
+/// not keep it apart from the consumer's: a `fileprivate` function with the same name and
+/// signature as one declared elsewhere in the module is an invalid redeclaration, not a
+/// shadow — and a hand-written `tupleToArray(_:count:as:)` is exactly what consumers wrote
+/// while the generated code required one.
+let tupleHelperName = "pjsipSwiftGenTupleToArray"
+
+let tupleHelperSource = """
+/// The first `count` elements of a C fixed-size array, which Swift imports as a
+/// homogeneous tuple. `count` is clamped to the array's capacity.
+fileprivate func \(tupleHelperName)<Tuple, Element>(
+    _ tuple: Tuple,
+    count: Int,
+    as _: Element.Type
+) -> [Element] {
+    let capacity = MemoryLayout<Tuple>.stride / MemoryLayout<Element>.stride
+    return withUnsafePointer(to: tuple) {
+        $0.withMemoryRebound(to: Element.self, capacity: capacity) {
+            Array(UnsafeBufferPointer(start: $0, count: min(max(count, 0), capacity)))
+        }
+    }
+}
+
+"""

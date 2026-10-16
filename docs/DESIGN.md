@@ -125,6 +125,22 @@ debugging session is brutal because the build "succeeds". Concretely: bumping
 the `swift-pjsip` package version replaces the entire Headers tree — with greedy
 inputs, that automatically invalidates the command and regenerates everything.
 
+## Helpers ship inside the generated files
+
+A struct description that renders a count+array pair needs a helper that turns the
+imported fixed-array tuple into an array. Generated code used to call a
+`tupleToArray(_:count:as:)` the consumer had to write, so a target with only
+`swift-pjsip` and this plugin failed to compile. Now each struct file that renders a pair
+carries its own `fileprivate` copy:
+
+- **Per file, not a shared file.** No file depends on another, and nothing has to join the
+  plan-time output list (constraint 2).
+- **Named for the generator** (`pjsipSwiftGenTupleToArray`). `fileprivate` alone does not
+  keep it apart from the consumer's code: a `fileprivate` function with the same name and
+  signature as one declared elsewhere in the module is an *invalid redeclaration*, not a
+  shadow — measured — and consumers who followed the old requirement have exactly that
+  `tupleToArray`.
+
 ## Dependency pinning
 
 This package depends on nothing. The headers come from the **consumer's**
