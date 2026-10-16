@@ -53,13 +53,9 @@ the consumer must depend on it directly — which a PJSIP app does anyway.)
 ```swift
 dependencies: [
     .package(url: "https://github.com/laconicman/swift-pjsip", from: "0.1.0"),
-    .package(url: "https://github.com/laconicman/swift-pjsip-gen", from: "0.1.0"),
+    .package(url: "https://github.com/laconicman/swift-pjsip-gen", from: "0.2.0"),
 ]
 ```
-
-> Until this repo has its first semantic-version tag, resolve it with
-> `branch: "main"` instead of `from:`. (Fully-qualified semver tags are also a
-> Swift Package Index listing requirement.)
 
 ### 2. Configure the target
 
