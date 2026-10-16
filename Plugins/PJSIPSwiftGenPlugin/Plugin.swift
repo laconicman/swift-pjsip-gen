@@ -15,11 +15,11 @@ import PackagePlugin
 /// `pjsip-swift-gen` executable, so `context.tool(named:).path` resolves to
 /// a deferred `${BUILD_DIR}/...` placeholder rather than a real binary.
 ///
-/// When invoked from SwiftPM, the plugin auto-discovers the `swift-pjsip`
-/// checkout via the consumer's transitive dependencies and reads headers
-/// directly from the bundled xcframework. The Xcode plugin context exposes
-/// no such API, so consumers building under Xcode must set `pjprojectRoot`
-/// in `pjsip-swift-gen.json`.
+/// When invoked from SwiftPM, the plugin finds `swift-pjsip`'s `PJSIP` binary
+/// target via the consumer's transitive dependencies and reads headers
+/// directly from its xcframework artifact. The Xcode plugin context exposes
+/// no such API, so under Xcode the plugin walks up from DerivedData instead,
+/// and `pjprojectRoot` in `pjsip-swift-gen.json` is the escape hatch.
 @main
 struct PJSIPSwiftGenPlugin: BuildToolPlugin {
     func createBuildCommands(
@@ -62,7 +62,8 @@ extension PJSIPSwiftGenPlugin: XcodeBuildToolPlugin {
         }
         // XcodePluginContext exposes no view of SwiftPM dependencies, so we
         // walk up from the plugin's work directory (which lives inside the
-        // project's DerivedData) to locate `SourcePackages/checkouts/swift-pjsip/`.
+        // project's DerivedData) to locate swift-pjsip's xcframework under
+        // `SourcePackages/`.
         let pjsipHeadersDir = locatePJSIPHeadersByWalkingUp(
             from: context.pluginWorkDirectory
         )
@@ -174,8 +175,14 @@ extension PJSIPSwiftGenPlugin {
 extension PJSIPSwiftGenPlugin {
     /// Walks the consumer's transitive dependency tree for the `swift-pjsip`
     /// package (declared as `name: "PJSIP"` in its manifest) and returns the
-    /// path to a Headers directory inside its xcframework, or `nil` if it
-    /// cannot be located.
+    /// path to a Headers directory inside its `PJSIP` binary target's
+    /// xcframework, or `nil` if it cannot be located.
+    ///
+    /// The xcframework's location is asked of SwiftPM, not composed from the
+    /// checkout: since swift-pjsip 0.2.1 it is a release asset, extracted outside
+    /// the checkout (`.build/artifacts/swift-pjsip/PJSIP/PJSIP.xcframework`). For
+    /// the binary committed to the repository before that, the artifact path is
+    /// the one inside the checkout, so both eras resolve the same way.
     fileprivate func locatePJSIPHeaders(in package: Package) -> Path? {
         guard let pjsipPackage = findDependency(
             displayName: pjsipPackageName,
@@ -189,8 +196,19 @@ extension PJSIPSwiftGenPlugin {
             return nil
         }
 
-        let xcframework = pjsipPackage.directory
-            .appending([xcframeworkSubpath, xcframeworkName])
+        guard let binaryTarget = pjsipPackage.targets
+            .lazy
+            .compactMap({ $0 as? BinaryArtifactTarget })
+            .first(where: { $0.name == pjsipTargetName })
+        else {
+            Diagnostics.warning(
+                "swift-pjsip has no `\(pjsipTargetName)` binary target; "
+                + "falling back to `pjprojectRoot` from the config."
+            )
+            return nil
+        }
+        // `artifact` is the tools-5.9 spelling; tools 6.0 renames it `artifactURL`.
+        let xcframework = binaryTarget.artifact
 
         guard let slice = firstSlice(under: xcframework) else {
             Diagnostics.warning(
@@ -241,33 +259,46 @@ extension PJSIPSwiftGenPlugin {
     }
 
     private var pjsipPackageName: String { "PJSIP" }
-    private var xcframeworkSubpath: String { "Binaries" }
+    private var pjsipTargetName: String { "PJSIP" }
     private var xcframeworkName: String { "PJSIP.xcframework" }
 
-    /// Walks parent directories of `start` looking for
-    /// `SourcePackages/checkouts/swift-pjsip/Binaries/PJSIP.xcframework`.
+    /// Where Xcode keeps swift-pjsip's xcframework, relative to `SourcePackages/`.
+    ///
+    /// The committed binary (swift-pjsip 0.1.x) is checked first: a checkout
+    /// is always the resolved version, so when it holds the binary, that binary is
+    /// the one being linked. Otherwise the release asset Xcode extracted for the
+    /// remote `.binaryTarget` (0.2.1 on) is the one.
+    private var xcodeXCFrameworkCandidates: [String] {
+        [
+            "checkouts/swift-pjsip/Binaries/" + xcframeworkName,
+            "artifacts/swift-pjsip/" + pjsipTargetName + "/" + xcframeworkName,
+        ]
+    }
+
+    /// Walks parent directories of `start` looking for swift-pjsip's xcframework
+    /// under `SourcePackages/` (see `xcodeXCFrameworkCandidates`).
     /// Used in Xcode build-tool contexts where the plugin runs from inside
     /// DerivedData but has no SPM API to enumerate package dependencies.
     fileprivate func locatePJSIPHeadersByWalkingUp(from start: Path) -> Path? {
         let fm = FileManager.default
         var dir = URL(fileURLWithPath: start.string)
-        let candidateRelative = "SourcePackages/checkouts/swift-pjsip/"
-            + xcframeworkSubpath + "/" + xcframeworkName
 
         for _ in 0..<20 {
-            let candidate = dir.appendingPathComponent(candidateRelative).path
-            if fm.fileExists(atPath: candidate) {
-                guard let slice = firstSlice(under: Path(candidate)) else {
-                    return nil
+            let sourcePackages = dir.appendingPathComponent("SourcePackages")
+            for relative in xcodeXCFrameworkCandidates {
+                let candidate = sourcePackages.appendingPathComponent(relative).path
+                // A candidate without a usable slice must not hide the next one.
+                if fm.fileExists(atPath: candidate),
+                   let slice = firstSlice(under: Path(candidate)) {
+                    return Path(candidate).appending([slice, "Headers"])
                 }
-                return Path(candidate).appending([slice, "Headers"])
             }
             let parent = dir.deletingLastPathComponent()
             if parent.path == dir.path { break }
             dir = parent
         }
         Diagnostics.remark(
-            "swift-pjsip checkout not found by walking up from "
+            "swift-pjsip xcframework not found by walking up from "
             + start.string
             + "; the plugin will require `pjprojectRoot` in the JSON config."
         )

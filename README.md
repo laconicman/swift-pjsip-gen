@@ -47,7 +47,7 @@ a core library, a thin CLI, a **build-tool plugin** (regenerate on every build) 
 ### 1. Add both packages
 
 Declare `swift-pjsip-gen` **and** `swift-pjsip` in the consumer. (The plugin finds
-PJSIP's headers by walking your dependency graph for the `swift-pjsip` checkout, so
+PJSIP's headers by walking your dependency graph for the `swift-pjsip` package, so
 the consumer must depend on it directly — which a PJSIP app does anyway.)
 
 ```swift
@@ -130,11 +130,13 @@ extension pjsua_state: @retroactive CustomDebugStringConvertible {
 
 In order:
 
-1. **SwiftPM builds:** walks the consumer's dependency graph for the `swift-pjsip`
-   package and reads `Binaries/PJSIP.xcframework/<slice>/Headers` directly.
-2. **Xcode builds:** Xcode's plugin API exposes no dependency graph, so the plugin
-   walks up from its work directory inside DerivedData to
-   `SourcePackages/checkouts/swift-pjsip/…`.
+1. **SwiftPM builds** (and package targets under Xcode): walks the consumer's
+   dependency graph for the `swift-pjsip` package and reads `<slice>/Headers` from
+   its `PJSIP` binary target's xcframework, wherever SwiftPM extracted it.
+2. **Xcode project targets:** Xcode's plugin API exposes no dependency graph, so the
+   plugin walks up from its work directory inside DerivedData to
+   `SourcePackages/artifacts/swift-pjsip/PJSIP/PJSIP.xcframework` (for swift-pjsip
+   0.1.x, which committed the binary: `SourcePackages/checkouts/swift-pjsip/Binaries/…`).
 3. **Escape hatch:** `pjprojectRoot` in the JSON config (resolved relative to the
    config file) — also how you point the generator at a raw `pjproject` source tree
    instead of the xcframework.
