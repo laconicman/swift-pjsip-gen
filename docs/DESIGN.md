@@ -127,8 +127,16 @@ inputs, that automatically invalidates the command and regenerates everything.
 
 ## Dependency pinning
 
-`swift-pjsip` is pinned `from: "0.1.0"` rather than `branch: "main"`: header
-drift becomes an explicit, reviewable version bump instead of a silent change.
+This package depends on nothing. The headers come from the **consumer's**
+`swift-pjsip`, found through the consumer's dependency graph (see "Locating the
+PJSIP headers"), so the consumer's `swift-pjsip` version is what decides the
+generated surface, and header drift is a version bump reviewed in the consumer's
+manifest.
+
+An earlier `swift-pjsip` dependency here was used by no target — the plugin walks
+the consumer's graph, never this package's — yet it made every build of this
+package resolve and fetch `swift-pjsip`, and SwiftPM warned that it "is not used
+by any target". It was removed rather than lived with.
 
 ## Open questions
 
@@ -139,14 +147,7 @@ drift becomes an explicit, reviewable version bump instead of a silent change.
    build-tool plugin spawning its own executable in `createBuildCommands`,
    tested under both `swift build` and `xcodebuild` — has not been built. If
    Xcode handles it after all, the duplication can be dropped.
-2. **The unused-dependency warning.** SwiftPM warns that the `swift-pjsip`
-   dependency "is not used by any target" — true at the target-graph level: the
-   plugin uses it only through the filesystem walk. Living with the warning,
-   plus having consumers declare `swift-pjsip` directly (which a PJSIP app needs
-   anyway), beats the alternative of making `PJSIPSwiftGenCore` nominally
-   `import PJSIP` (which would drag a ~26 MB binary into the generator's own
-   build).
-3. **Plugin trust in CI.** The Xcode IDE prompts interactively to trust build
+2. **Plugin trust in CI.** The Xcode IDE prompts interactively to trust build
    plugins (and re-prompts when the plugin fingerprint changes); headless
    `xcodebuild` just fails with `Validate plug-in "…"`. CI must pass
    `-skipPackagePluginValidation`. Worth automating into any CI recipe that
