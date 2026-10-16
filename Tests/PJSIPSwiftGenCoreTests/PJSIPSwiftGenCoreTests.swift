@@ -349,7 +349,7 @@ final class PJSIPSwiftGenCoreTests: XCTestCase {
          "skipTypes": [], "manualTypes": []}
         """.data(using: .utf8)!
         let config = try JSONDecoder().decode(PJSIPSwiftGenConfig.self, from: json)
-        let found = discoverTypes(config: config, pjprojectRoot: root)
+        let found = try discoverTypes(config: config, pjprojectRoot: root)
 
         // The include guard must not be mistaken for a feature guard, and the real guard
         // must keep its negation.
@@ -398,13 +398,89 @@ final class PJSIPSwiftGenCoreTests: XCTestCase {
          "skipTypes": [], "manualTypes": []}
         """.data(using: .utf8)!
         let config = try JSONDecoder().decode(PJSIPSwiftGenConfig.self, from: json)
-        let found = discoverTypes(config: config, pjprojectRoot: root)
+        let found = try discoverTypes(config: config, pjprojectRoot: root)
 
         // The type after the spaceless block must be UNGUARDED. Before the fix the stack
         // was popped once too often and this inherited a stale condition.
         XCTAssertNil(found.structs.first(where: { $0.name == "after_it" })?.ppCondition)
         XCTAssertEqual(found.structs.first(where: { $0.name == "inside_spaceless" })?.ppCondition,
                        "(SOMETHING)")
+    }
+
+    // MARK: - Entries that name nothing (#3)
+
+    /// `searchRoots` written for a raw pjproject tree match nothing under the xcframework's
+    /// flat `Headers/`. That used to discover 0 types and exit 0; it must fail, naming the
+    /// entry — and only the missing one.
+    func testMissingSearchRootFailsNamingIt() throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try "typedef struct present { int a; } present;"
+            .write(toFile: "\(root)/h.h", atomically: true, encoding: .utf8)
+
+        let json = """
+        {"searchRoots": ["", "pjsip/include"], "rootTypes": ["present"],
+         "skipTypes": [], "manualTypes": []}
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(PJSIPSwiftGenConfig.self, from: json)
+
+        XCTAssertThrowsError(try discoverTypes(config: config, pjprojectRoot: root)) { error in
+            guard case DiscoveryError.searchRootsNotFound(let entries, let headersRoot)? =
+                error as? DiscoveryError
+            else { return XCTFail("unexpected error: \(error)") }
+            XCTAssertEqual(entries, ["pjsip/include"])
+            XCTAssertEqual(headersRoot, root)
+            XCTAssertTrue("\(error)".contains("'pjsip/include'"), "\(error)")
+        }
+    }
+
+    /// A misspelt root type is the other way to get an empty run that looks like success.
+    func testUnknownRootTypeFailsNamingIt() throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try "typedef struct present { int a; } present;"
+            .write(toFile: "\(root)/h.h", atomically: true, encoding: .utf8)
+
+        let json = """
+        {"searchRoots": [""], "rootTypes": ["present", "pjsua_acc_cfg"],
+         "skipTypes": [], "manualTypes": []}
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(PJSIPSwiftGenConfig.self, from: json)
+
+        XCTAssertThrowsError(try discoverTypes(config: config, pjprojectRoot: root)) { error in
+            guard case DiscoveryError.rootTypesNotFound(let entries)? = error as? DiscoveryError
+            else { return XCTFail("unexpected error: \(error)") }
+            XCTAssertEqual(entries, ["pjsua_acc_cfg"])
+            XCTAssertTrue("\(error)".contains("'pjsua_acc_cfg'"), "\(error)")
+        }
+    }
+
+    /// Empty lists are the remaining ways to run and find nothing: no root types can only
+    /// ever discover nothing, and no search roots leave every root type undeclared.
+    func testEmptyRootTypesOrSearchRootsFail() throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try "typedef struct present { int a; } present;"
+            .write(toFile: "\(root)/h.h", atomically: true, encoding: .utf8)
+        func config(searchRoots: [String], rootTypes: [String]) -> PJSIPSwiftGenConfig {
+            PJSIPSwiftGenConfig(pjprojectRoot: nil, searchRoots: searchRoots,
+                                rootTypes: rootTypes, skipTypes: [], manualTypes: [],
+                                imports: nil)
+        }
+
+        XCTAssertThrowsError(try discoverTypes(
+            config: config(searchRoots: [""], rootTypes: []), pjprojectRoot: root
+        )) { error in
+            guard case DiscoveryError.noRootTypes? = error as? DiscoveryError
+            else { return XCTFail("unexpected error: \(error)") }
+        }
+        XCTAssertThrowsError(try discoverTypes(
+            config: config(searchRoots: [], rootTypes: ["present"]), pjprojectRoot: root
+        )) { error in
+            guard case DiscoveryError.rootTypesNotFound(let entries)? = error as? DiscoveryError
+            else { return XCTFail("unexpected error: \(error)") }
+            XCTAssertEqual(entries, ["present"])
+        }
     }
 
     /// The refusal tally must belong to the CALL, not the process. It decides whether the

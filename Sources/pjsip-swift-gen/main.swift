@@ -101,7 +101,13 @@ if let override = pjsipHeadersDirOverride {
 
 // MARK: - Discover types
 
-let result = discoverTypes(config: config, pjprojectRoot: pjRoot)
+let result: DiscoveryResult
+do {
+    result = try discoverTypes(config: config, pjprojectRoot: pjRoot)
+} catch {
+    fputs("Error: \(error)\n", stderr)
+    exit(1)
+}
 let manualSet = Set(config.manualTypes)
 
 // MARK: - Dispatch

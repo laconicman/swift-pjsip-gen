@@ -109,7 +109,7 @@ extension PJSIPSwiftGenPlugin {
             )
         }
 
-        let result = discoverTypes(config: config, pjprojectRoot: pjRootString)
+        let result = try discoverTypes(config: config, pjprojectRoot: pjRootString)
         let manualSet = Set(config.manualTypes)
         let outputFiles = expectedOutputFilenames(
             for: result,

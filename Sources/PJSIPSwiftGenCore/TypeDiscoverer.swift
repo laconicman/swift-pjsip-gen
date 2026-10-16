@@ -31,15 +31,65 @@ public struct DiscoveryResult {
     }
 }
 
+/// A configuration that names nothing in the headers.
+///
+/// Thrown rather than skipped: an entry that matches nothing used to produce an empty run
+/// that exited 0, so the consumer built without a single generated conformance and without
+/// a diagnostic. The usual cause is `searchRoots` written for a raw pjproject tree
+/// (`pjsip/include`, …) pointed at the xcframework's flat `Headers/`.
+public enum DiscoveryError: Error, CustomStringConvertible {
+    /// `rootTypes` is empty, so the run could only ever discover nothing.
+    case noRootTypes
+    /// `searchRoots` entries with no directory under the headers root.
+    case searchRootsNotFound([String], headersRoot: String)
+    /// `rootTypes` entries that no scanned header declares.
+    case rootTypesNotFound([String])
+
+    public var description: String {
+        switch self {
+        case .noRootTypes:
+            return "rootTypes is empty, so there is nothing to generate. Name at least one "
+                + "root type, or detach the plugin."
+        case .searchRootsNotFound(let entries, let headersRoot):
+            return "searchRoots \(entries.map { "'\($0)'" }.joined(separator: ", ")) "
+                + "not found under '\(headersRoot)'. The xcframework's Headers/ is flat: "
+                + "use [\"\"] to scan all of it."
+        case .rootTypesNotFound(let entries):
+            return "rootTypes \(entries.map { "'\($0)'" }.joined(separator: ", ")) "
+                + "not declared in any header under searchRoots. Misspelt, or not declared "
+                + "as `typedef enum NAME` or `struct NAME {`, the forms the scanner records?"
+        }
+    }
+}
+
 public func discoverTypes(
     config: PJSIPSwiftGenConfig,
     pjprojectRoot pjRoot: String
-) -> DiscoveryResult {
+) throws -> DiscoveryResult {
+    guard !config.rootTypes.isEmpty else { throw DiscoveryError.noRootTypes }
     var typeMap: [String: (kind: TypeKind, headerPath: String, ppCondition: String?)] = [:]
+    var missingSearchRoots: [String] = []
     for searchRoot in config.searchRoots {
         let rootPath = URL(fileURLWithPath: pjRoot)
             .appendingPathComponent(searchRoot).path
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: rootPath, isDirectory: &isDir),
+              isDir.boolValue
+        else {
+            missingSearchRoots.append(searchRoot)
+            continue
+        }
         scanHeaders(in: rootPath, into: &typeMap)
+    }
+    // A missing search root explains any root type it hides, so it is reported alone.
+    if !missingSearchRoots.isEmpty {
+        throw DiscoveryError.searchRootsNotFound(missingSearchRoots, headersRoot: pjRoot)
+    }
+    let unknownRootTypes = config.rootTypes.filter { rootType in
+        cleanTypeName(rootType).map { typeMap[$0] == nil } ?? true
+    }
+    if !unknownRootTypes.isEmpty {
+        throw DiscoveryError.rootTypesNotFound(unknownRootTypes)
     }
 
     let skipSet = Set(config.skipTypes)
