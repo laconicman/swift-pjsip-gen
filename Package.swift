@@ -25,12 +25,6 @@ let package = Package(
             targets: ["PJSIPSwiftGenCommand"]
         )
     ],
-    dependencies: [
-        .package(
-            url: "https://github.com/laconicman/swift-pjsip",
-            from: "0.1.0"
-        )
-    ],
     targets: [
         .target(
             name: "PJSIPSwiftGenCore"
